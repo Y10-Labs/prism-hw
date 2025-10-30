@@ -1,0 +1,1 @@
+iverilog -g2005-sv axis_master.v axi_stream_slave.v lambdagen_s1.v lambdagen_s2.v lambdagen_s3.v lambdagen_s4.v lambdagen_s5.v lambdagen_s6.v lambdagen.v lg_top.v top_tb.v div.v  
