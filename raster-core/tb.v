@@ -17,12 +17,17 @@ module tb_raster_core;
     reg [LWIDTH-1:0] data;
     wire ready;
     
+    // AXI Stream Master interface signals
+    reg output_handshake;
+    wire output_valid;
+    wire [15:0] output_data;
+    
     // BRAM interface signals
     wire rch_en;
-    wire [31:0] rch_addr;
+    wire [8:0] rch_addr;
     reg [31:0] rch_data;
     wire wch_en;
-    wire [31:0] wch_addr;
+    wire [8:0] wch_addr;
     wire [31:0] wch_data;
 
     // BRAM memory model with configurable latency
@@ -47,6 +52,9 @@ module tb_raster_core;
         .is_handshake(is_handshake),
         .data(data),
         .ready(ready),
+        .output_handshake(output_handshake),
+        .output_valid(output_valid),
+        .output_data(output_data),
         .rch_en(rch_en),
         .rch_addr(rch_addr),
         .rch_data(rch_data),
@@ -242,6 +250,57 @@ module tb_raster_core;
         end
     endtask
 
+    // Task to receive output data via AXI Stream Master interface
+    task receive_output_data;
+        input integer max_transfers;
+        integer transfer_count;
+        integer wait_count;
+        
+        begin
+            $display("Time %0t: Starting to receive output data...", $time);
+            transfer_count = 0;
+            wait_count = 0;
+            
+            while (transfer_count < max_transfers && wait_count < 1000) begin
+                @(negedge clk);
+                
+                // Check if output is valid
+                if (output_valid) begin
+                    // Assert handshake to accept the data
+                    output_handshake = 1'b1;
+                    $display("Time %0t: AXI Master Output - Data: 0x%04h (transfer %0d)", 
+                             $time, output_data, transfer_count);
+                    @(posedge clk);
+                    @(negedge clk);
+                    output_handshake = 1'b0;
+                    transfer_count = transfer_count + 1;
+                    wait_count = 0; // Reset wait counter on successful transfer
+                    
+                    // Check if ready went high (indicates completion)
+                    if (ready) begin
+                        $display("Time %0t: Output transfer complete (ready asserted after %0d transfers)", 
+                                 $time, transfer_count);
+                        transfer_count = max_transfers; // Exit loop
+                    end
+                end else begin
+                    wait_count = wait_count + 1;
+                end
+                
+                // Safety timeout
+                if (wait_count >= 50 && transfer_count == 0) begin
+                    $display("Time %0t: WARNING - No valid output received after 50 cycles, may not be in WRITEBACK mode", $time);
+                    transfer_count = max_transfers; // Exit loop
+                end
+            end
+            
+            if (wait_count >= 1000) begin
+                $display("Time %0t: ERROR - Timeout waiting for output data", $time);
+            end else begin
+                $display("Time %0t: Finished receiving output data (%0d transfers)", $time, transfer_count);
+            end
+        end
+    endtask
+
     // Main test sequence
     initial begin
         $display("=== Raster Core Testbench ===");
@@ -253,6 +312,7 @@ module tb_raster_core;
         is_handshake = 1'b0;
         data = 32'h0;
         rch_data = 32'h0;
+        output_handshake = 1'b0;
         test_case = 0;
         cycle_count = 0;
         
@@ -320,6 +380,33 @@ module tb_raster_core;
         
         wait_for_completion();
         
+        // Test Case 4: End triangle (should trigger writeback/AXI Master output)
+        test_case = 4;
+        $display("\n=== Test Case %0d: End Triangle (Writeback Mode) ===", test_case);
+        
+        // Note: End triangle detection requires is_end_triangle flag to be set properly
+        // in raster_core.v. For now, this test sends a triangle with y_start=63, y_end=63
+        // which should be outside core_id range and get skipped.
+        // To test WRITEBACK mode, you would need to set is_end_triangle appropriately
+        // in the raster_core logic (e.g., when y_start >= 62)
+        send_triangle_data(
+            32'h3F3F0080,    // header: y_start=63, y_end=63, x_len=128 (should be skipped)
+            32'h05000000,    // lambda_zero[0]
+            32'h15000000,    // lambda_zero[1]
+            32'h00050000,    // lambda_diff[0]
+            32'h00150000,    // lambda_diff[1]
+            32'h00100000,    // lambda_diff[2]
+            32'h00200000,    // lambda_diff[3]
+            16'h0500,        // z_zero
+            16'h0005,        // z_diff[0]
+            16'h0015         // z_diff[1]
+        );
+        
+        // Try to receive output data from AXI Stream Master interface
+        // This will timeout if not in WRITEBACK mode
+        cycle_count = 0;
+        receive_output_data(450); // Receive up to 450 transfers (x_len=400 + latency)
+        
         // Display some memory contents to verify writes
         $display("\n=== Memory Verification ===");
         for (i = 0; i < 16; i = i + 1) begin
@@ -335,6 +422,12 @@ module tb_raster_core;
     always @(posedge clk) begin
         if (rch_en) begin
             $display("Time %0t: BRAM Read - Addr: 0x%08h", $time, rch_addr);
+        end
+        
+        // Monitor AXI Stream Master interface
+        if (output_valid && !output_handshake) begin
+            $display("Time %0t: AXI Master - output_valid=1, waiting for handshake, data=0x%04h", 
+                     $time, output_data);
         end
     end
 

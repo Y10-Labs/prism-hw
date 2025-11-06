@@ -25,7 +25,7 @@ module AXI_STREAM_MASTER # (
     
     // data source
     output wire [SRC_ADDR_WIDTH - 1: 0] 	src_addr,
-    output wire 			      	src_enable,
+    output wire 			      	        src_enable,
     input  wire [C_S_AXIS_TDATA_WIDTH - 1: 0] 	src_data
 );
 
