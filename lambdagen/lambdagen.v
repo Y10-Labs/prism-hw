@@ -13,7 +13,7 @@ module lambdagen#(
     input valid,
     input [127:0] input_bus,
     input stall,
-    input [1:0] quad,  
+    input [2:0] quad,  
 
     output [LWIDTH-1:0] l1,
     output [LWIDTH-1:0] l2,
@@ -42,12 +42,11 @@ module lambdagen#(
     reg signed [YWIDTH-1:0] y1_s0, y2_s0, y3_s0; //8
     reg signed [ZWIDTH-1:0] z1_s0, z2_s0, z3_s0; //16
 
-    reg [1:0] quad_reg;
-
     reg [4:0] __;
     reg [7:0] _;
     
     reg valid_s0; 
+    reg [2:0] quad_reg;
 
     // always @(posedge clk) begin
     //     if (rst) begin
