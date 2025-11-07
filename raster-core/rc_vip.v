@@ -81,7 +81,7 @@ module rc_tb;
         wait (aresetn == 1'b1);
 
         send_triangle_data(
-            32'h00110080,    // header
+            32'h001103C0,    // header
             32'h10000000,    // lambda_zero[0]
             32'h20000000,    // lambda_zero[1]
             32'h00100000,    // lambda_diff[0]
@@ -96,10 +96,50 @@ module rc_tb;
         #240ns;
 
         // Wait for processing to complete
-        #50us;
+        #5us;
         
         $display("\n=== Test Case 1 Complete ===\n");
-        
+
+        send_triangle_data(
+            32'h002103C0,    // header
+            32'h20000000,    // lambda_zero[0]
+            32'h30000000,    // lambda_zero[1]
+            32'h00100000,    // lambda_diff[0]
+            32'h00250000,    // lambda_diff[3]
+            32'h00200000,    // lambda_diff[1]
+            32'h00150000,    // lambda_diff[2]
+            16'h1060,        // z_zero
+            16'hFFF0,        // z_diff[0]
+            16'h0020         // z_diff[1]
+        );
+
+        #240ns;
+
+        // Wait for processing to complete
+        #5us;
+
+        /*
+        send_triangle_data(
+            32'h001107FF,    // header
+            32'h10000000,    // lambda_zero[0]
+            32'h20000000,    // lambda_zero[1]
+            32'h00100000,    // lambda_diff[0]
+            32'h00200000,    // lambda_diff[1]
+            32'h00150000,    // lambda_diff[2]
+            32'h00250000,    // lambda_diff[3]
+            16'h1000,        // z_zero
+            16'h0010,        // z_diff[0]
+            16'h0020         // z_diff[1]
+        );
+
+        #240ns;
+
+        // Wait for processing to complete
+        #5us;
+
+        $display("\n=== Flushed BRAM ===\n");
+        */
+
         // Additional test case with different triangle
         send_triangle_data(
             32'h000A007F,    // header: y_start=31, y_end=10, x_len=96
@@ -118,12 +158,12 @@ module rc_tb;
 
         ready_gen = slave_agent.driver.create_ready("ready_gen");
         ready_gen.set_ready_policy(XIL_AXI4STREAM_READY_GEN_OSC);
-        ready_gen.set_low_time(1);
-        ready_gen.set_high_time(2);
+        ready_gen.set_low_time(0);
+        ready_gen.set_high_time(1);
         slave_agent.driver.send_tready(ready_gen);
         
         // Wait for second test to complete
-        #50us;
+        #100us;
         
         $display("\n=== Test Case 2 Complete ===\n");
         $display("=== All Tests Complete ===");

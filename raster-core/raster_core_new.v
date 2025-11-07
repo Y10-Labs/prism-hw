@@ -52,12 +52,12 @@ module raster_core_impl #(
 
     // data
     reg[31:0] header;
-    reg signed[31:0] lambda_zero[1:0];
+    reg[31:0] lambda_zero[1:0];
     // lambda_zero[0] dx, lambda_zero[0] dy, lambda_zero[1] dx, lambda_zero[1] dy
-    reg signed[31:0] lambda_diff[3:0];
-    reg signed[15:0] z_zero;
+    reg[31:0] lambda_diff[3:0];
+    reg[15:0] z_zero;
     // z dx, z dy
-    reg signed[15:0] z_diff[1:0];
+    reg[15:0] z_diff[1:0];
 
     // should we skip this triangle?
     reg skip_triangle;
@@ -67,8 +67,7 @@ module raster_core_impl #(
     reg is_end_triangle;
     wire comb_end_triangle = (y_start >= 31);
 
-    reg is_flush_triangle;
-    wire comb_flush_triangle = (y_end >= 31);
+    wire is_flush_triangle = (y_end >= 31);
 
     // data iterator
     reg[3:0] data_it;
@@ -88,15 +87,15 @@ module raster_core_impl #(
     // should we write this pixel?
     wire should_write_pixel;
     assign should_write_pixel = 
-        ((lambda_zero[0][31] == 0) && 
-         (lambda_zero[1][31] == 0) && 
-         (lambda_sum[31]     == 0) && 
-         (z_zero > rch_data[15:0]) && 
-         (x_it >= BRAM_LATENCY)    && 
-         (rasterizer_state == RASTERIZING)) || (rasterizer_state == BRAM_FLUSH);
+        (lambda_zero[0][31] == 0) && 
+        (lambda_zero[1][31] == 0) && 
+        (lambda_sum[31]     == 0) && 
+        (z_zero > rch_data[15:0]) && 
+        (x_it >= BRAM_LATENCY)    && 
+        ((rasterizer_state == RASTERIZING) || (rasterizer_state == BRAM_FLUSH));
 
     // connect to bram interface
-    assign rch_en = (rasterizer_state == RASTERIZING) || (rasterizer_state == WRITEBACK);
+    assign rch_en = (rasterizer_state == RASTERIZING);
     assign rch_addr = x_it;
     
     assign wch_en = should_write_pixel;
@@ -114,10 +113,6 @@ module raster_core_impl #(
     
     wire valid;
     assign valid = (x_it >= BRAM_LATENCY) && (rasterizer_state == WRITEBACK);
-
-    wire signed[36:0] ladj_0 = $signed(lambda_zero[0]) + $signed(lambda_diff[1]) * core_id;
-    wire signed[36:0] ladj_1 = $signed(lambda_zero[1]) + $signed(lambda_diff[3]) * core_id;
-    wire signed[36:0] zadj_0 = $signed(z_zero) + $signed(z_diff[1]) * core_id;
 
     //wire[7:0] x_len = header[19:12];
     //wire[8:0] x_len = 400;
@@ -141,7 +136,6 @@ module raster_core_impl #(
             data_it <= 0;
             skip_triangle <= 0;
             is_end_triangle <= 0;
-            is_flush_triangle <= 0;
             rasterizer_state <= IDLE;
 
             // latency counter
@@ -187,7 +181,6 @@ module raster_core_impl #(
             if(data_it == 0) begin
                 skip_triangle <= comb_skip_triangle;
                 is_end_triangle <= comb_end_triangle;
-                is_flush_triangle <= comb_flush_triangle;
                 if(!comb_skip_triangle) begin
                     header <= data[31:0];
                 end
@@ -211,7 +204,6 @@ module raster_core_impl #(
             // Flush the bram, rewrite all depth information to zero
             // then go to idle
             z_zero <= 0;
-            header <= 0;
 
             // if more than X_MAX + BRAM_LATENCY all pixels have been processed, go back to idle
             if(x_it >= X_MAX + BRAM_LATENCY) begin
@@ -225,9 +217,9 @@ module raster_core_impl #(
         // preprocessing, setup initial values and 
         // move triangle parameters to the start of the current scanline
         else if(rasterizer_state == PREPROCESSING) begin
-            lambda_zero[0] <= ladj_0[31:0];
-            lambda_zero[1] <= ladj_1[31:0];
-            z_zero <= zadj_0[31:0];
+            lambda_zero[0] <= lambda_zero[0] + lambda_diff[1] * core_id;
+            lambda_zero[1] <= lambda_zero[1] + lambda_diff[3] * core_id;
+            z_zero <= z_zero + z_diff[1] * core_id;
 
             // position zero
             x_it <= 0;
@@ -237,11 +229,11 @@ module raster_core_impl #(
         else if(rasterizer_state == RASTERIZING) begin
             if(x_it >= BRAM_LATENCY) begin
                 // lambda update
-                lambda_zero[0] <= $signed(lambda_zero[0]) + $signed(lambda_diff[0]);
-                lambda_zero[1] <= $signed(lambda_zero[1]) + $signed(lambda_diff[2]);
+                lambda_zero[0] <= lambda_zero[0] + lambda_diff[0];
+                lambda_zero[1] <= lambda_zero[1] + lambda_diff[2];
 
                 // z update
-                z_zero <= $signed(z_zero) + $signed(z_diff[0]);
+                z_zero <= z_zero + z_diff[0];
             end
 
             // if more than x_len + BRAM_LATENCY all pixels have been processed, go back to idle
