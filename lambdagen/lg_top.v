@@ -1,6 +1,6 @@
 `timescale 1ns/1ps
 
-module lg_top (
+module lg_top #(parameter PIPE_LATENCY = 18)(
 	input wire clk,
 	input wire rst,
 	// AXI Stream slave interface
@@ -21,7 +21,7 @@ module lg_top (
 
 	// Internal signals for lambdagen
 	wire lambdagen_stall;
-	wire [1:0] lambdagen_quad = 2'b00; // Example, can be parameterized
+	wire [2:0] lambdagen_quad = 2'b00; // Example, can be parameterized
 	wire [31:0] l1, l2, dl1x, dl2x, dl1y, dl2y, z_, dzx, dzy;
 	wire signed [15:0] _z1, _z2, _z3;
 	wire [15:0] tID;
@@ -38,11 +38,12 @@ module lg_top (
 		.DATA_W(32)
 	) axis_slave_inst (
 		.aclk(clk),
-		.aresetn(~rst),
+		.aresetn(rst),
 		.s_tdata(s_tdata),
 		.s_tvalid(s_tvalid),
 		.s_tready(s_tready),
 		.s_tlast(s_tlast),
+		.stall(lambdagen_stall),
 		.m_data128(deser_data),
 		.m_valid(deser_valid),
 		.m_ready(~lambdagen_stall)
@@ -51,7 +52,7 @@ module lg_top (
 	// Lambdagen core
 	lambdagen lambdagen_inst (
 		.clk(clk),
-		.rst(rst),
+		.rst(~rst),
 		.valid(deser_valid),
 		.input_bus(deser_data),
 		.stall(lambdagen_stall),
@@ -99,31 +100,51 @@ module lg_top (
 	wire [8:0] x_min = (x_min_12 < x3_input) ? x_min_12 : x3_input;
 	wire [8:0] x_max = (x_max_12 > x3_input) ? x_max_12 : x3_input;
 	wire [8:0] x_len_calc = x_max - x_min;
-	
-	// Registered values captured when triangle arrives
-	reg [5:0] y_start_reg;
-	reg [5:0] y_end_reg;
-	reg [7:0] x_len_reg;
-	reg [31:0] header_reg;
-	
-	// Capture header values when new triangle data arrives
-	always @(posedge clk) begin
-		if (rst) begin
-			y_start_reg <= 6'd0;
-			y_end_reg <= 6'd0;
-			x_len_reg <= 8'd0;
-			header_reg <= 32'h0;
-		end else if (deser_valid && !lambdagen_stall) begin
-			// Capture y_start, y_end, x_len from input triangle
-			y_start_reg <= y_min[5:0];
-			y_end_reg <= y_max[5:0];
-			x_len_reg <= x_len_calc[7:0];
-		end else if (dovalid && !lambdagen_stall) begin
-			// Pack header when lambdagen completes processing
-			// Format: {4'h0, tID[11:0], x_len[7:0], y_end[5:0], y_start[5:0]}
-			header_reg <= {4'h0, tID[11:0], x_len_reg, y_end_reg, y_start_reg};
-		end
-	end
+	    
+    reg [5:0] y_start_pipe [0:PIPE_LATENCY-1];
+    reg [5:0] y_end_pipe [0:PIPE_LATENCY-1];
+    reg [7:0] x_len_pipe [0:PIPE_LATENCY-1];
+    reg [5:0] y_start_reg;
+    reg [5:0] y_end_reg;
+    reg [7:0] x_len_reg;
+    reg [31:0] header_reg;
+    
+    integer i;
+    
+    always @(posedge clk) begin
+        if (~rst) begin
+            for (i = 0; i < PIPE_LATENCY; i = i + 1) begin
+                y_start_pipe[i] <= 6'd0;
+                y_end_pipe[i] <= 6'd0;
+                x_len_pipe[i] <= 8'd0;
+            end
+            y_start_reg <= 6'd0;
+            y_end_reg <= 6'd0;
+            x_len_reg <= 8'd0;
+            header_reg <= 32'h0;
+        end else if (!lambdagen_stall) begin
+            if (deser_valid) begin
+                y_start_pipe[0] <= y_min[5:0];
+                y_end_pipe[0] <= y_max[5:0];
+                x_len_pipe[0] <= x_len_calc[7:0];
+            end else begin
+                y_start_pipe[0] <= 6'd0;
+                y_end_pipe[0] <= 6'd0;
+                x_len_pipe[0] <= 8'd0;
+            end
+            for (i = 1; i < PIPE_LATENCY; i = i + 1) begin
+                y_start_pipe[i] <= y_start_pipe[i-1];
+                y_end_pipe[i] <= y_end_pipe[i-1];
+                x_len_pipe[i] <= x_len_pipe[i-1];
+            end
+            y_start_reg <= y_start_pipe[PIPE_LATENCY-1];
+            y_end_reg <= y_end_pipe[PIPE_LATENCY-1];
+            x_len_reg <= x_len_pipe[PIPE_LATENCY-1];
+            if (dovalid) begin
+                header_reg <= {4'h0, tID[11:0], x_len_reg, y_end_reg, y_start_reg};
+            end
+        end
+    end
 
 	// Mux for selecting lambdagen outputs based on src_addr from master
 	// Order matches raster_core_impl data_it sequence:
@@ -149,7 +170,7 @@ module lg_top (
 	// This can help if lambdagen outputs have long combinational paths
 	reg [31:0] src_data_reg;
 	always @(posedge clk) begin
-		if (rst) begin
+		if (~rst) begin
 			src_data_reg <= 32'h0;
 		end else if (src_enable) begin
 			src_data_reg <= src_data_mux;
@@ -164,7 +185,7 @@ module lg_top (
 		.C_S_AXIS_TDATA_WIDTH(32)
 	) axis_master_inst (
 		.S_AXIS_ACLK(clk),
-		.S_AXIS_ARESETN(~rst),
+		.S_AXIS_ARESETN(rst),
 		.S_AXIS_TREADY(m_tready),
 		.S_AXIS_TDATA(m_tdata),
 		.S_AXIS_TSTRB(), // Not connected

@@ -11,25 +11,27 @@ module division(
 // in gpu it is 40 bits signed integer (for 24.8 format output and truncating last 8 LSBs from division output) by 32 bits signed integer division
 // input valid is a pulse
 // output is valid until is input is valid again
-// takes 8 cycles to get output - pipelined to 1 throughput per cycle after initial latency
+// takes 10 cycles to get output (was 8, now 10) - pipelined to 1 throughput per cycle after initial latency
 
-// Pipeline valids 
-reg v0, v1, v2, v3, v4, v5, v6, v7;
+// Pipeline valids - extended to 10 stages
+reg v0, v1, v2, v3, v4, v5, v6, v7, v8, v9;
 
 wire accept = input_valid;
 
 always @(posedge clk) begin
     if (!reset) begin
         v0 <= 1'b0; v1 <= 1'b0; v2 <= 1'b0; v3 <= 1'b0; 
-        v4 <= 1'b0; v5 <= 1'b0; v6 <= 1'b0; v7 <= 1'b0; 
+        v4 <= 1'b0; v5 <= 1'b0; v6 <= 1'b0; v7 <= 1'b0;
+        v8 <= 1'b0; v9 <= 1'b0;
     end else begin
         v0 <= accept;
         v1 <= v0; v2 <= v1; v3 <= v2; v4 <= v3;
-        v5 <= v4; v6 <= v5; v7 <= v6; 
+        v5 <= v4; v6 <= v5; v7 <= v6; v8 <= v7;
+        v9 <= v8;
     end
 end
 
-assign quo_valid = v7;
+assign quo_valid = v9;
 
 // Stage S0: latch inputs, compute abs, sign, div_by_zero
 reg signed [39:0] s1_dividend;
@@ -88,7 +90,7 @@ recip_lut lut_inst (.index(lut_index), .value(X_0));
 reg [31:0] s3_divisor;
 reg [39:0] s3_dividend;
 reg s3_sign;
-reg [31:0] s3_X;  // Added to store X value
+reg [31:0] s3_X;
 
 always @(posedge clk) begin
     if(!reset) begin
@@ -100,11 +102,11 @@ always @(posedge clk) begin
         s3_sign <= s2_sign;
         s3_dividend <= s2_dividend;
         s3_divisor <= s2_divisor;
-        s3_X <= X_0;  // Store initial X
+        s3_X <= X_0;
     end
 end
 
-// Stage S3: NR iteration 1 Part 1
+// Stage S3: NR iteration 1 Part 1 - Compute D * X0
 reg [63:0] s4_DX1;
 reg [31:0] s4_divisor;
 reg [39:0] s4_dividend;
@@ -119,7 +121,7 @@ always @(posedge clk) begin
         s4_divisor <= 0;  
         s4_X <= 0;
     end else begin
-        s4_DX1 <= s3_divisor * s3_X;  // Compute D * X0
+        s4_DX1 <= s3_divisor * s3_X;
         s4_sign <= s3_sign;
         s4_dividend <= s3_dividend;
         s4_divisor <= s3_divisor;
@@ -127,79 +129,122 @@ always @(posedge clk) begin
     end
 end
 
-// Stage S4: NR iteration 1 Part 2
-reg [63:0] s5_X1;
+// Stage S4: NR iteration 1 Part 2a - Compute (2 - D*X0)
+reg [31:0] s5_two_minus_dx1;
+reg [31:0] s5_X;
 reg [31:0] s5_divisor;
 reg [39:0] s5_dividend;
 reg s5_sign;
 
 always @(posedge clk) begin
     if (!reset) begin
-        s5_X1 <= 0;
+        s5_two_minus_dx1 <= 0;
+        s5_X <= 0;
         s5_sign <= 0;
         s5_dividend <= 0;
         s5_divisor <= 0; 
     end else begin
-        // Now s4_DX1 is available from previous cycle
-        s5_X1 <= (s4_X * ((2 << 16) - s4_DX1[47:16]));  // X1 = X0 * (2 - D*X0)
+        s5_two_minus_dx1 <= (32'd131072) - s4_DX1[47:16];  // 2 - D*X0
+        s5_X <= s4_X;
         s5_sign <= s4_sign;
         s5_dividend <= s4_dividend;
         s5_divisor <= s4_divisor;
     end
 end
 
-// Stage S5: NR iteration 2 Part 1
-reg [63:0] s6_DX2;
-reg [31:0] s6_X1;
-reg final_sign;
-reg [39:0] final_dividend;
+// Stage S5: NR iteration 1 Part 2b - Compute X1 = X0 * (2 - D*X0)
+reg [63:0] s6_X1;
+reg [31:0] s6_divisor;
+reg [39:0] s6_dividend;
+reg s6_sign;
 
 always @(posedge clk) begin
     if (!reset) begin
-        s6_DX2 <= 0;
         s6_X1 <= 0;
-        final_sign <= 0;
-        final_dividend <= 0;
+        s6_sign <= 0;
+        s6_dividend <= 0;
+        s6_divisor <= 0; 
     end else begin
-        s6_DX2 <= s5_divisor * s5_X1[47:16];  // Compute D * X1
-        s6_X1 <= s5_X1[47:16];
-        final_sign <= s5_sign;
-        final_dividend <= s5_dividend;
+        s6_X1 <= s5_X * s5_two_minus_dx1;  // X1 = X0 * (2 - D*X0)
+        s6_sign <= s5_sign;
+        s6_dividend <= s5_dividend;
+        s6_divisor <= s5_divisor;
     end
 end
 
-// Stage S6: NR iteration 2 Part 2
-reg [63:0] final_X;
-reg [39:0] final_dividend_reg;
-reg final_sign_reg;
+// Stage S6: NR iteration 2 Part 1 - Compute D * X1
+reg [63:0] s7_DX2;
+reg [31:0] s7_X1;
+reg [39:0] s7_dividend;
+reg s7_sign;
+
 always @(posedge clk) begin
     if (!reset) begin
-        final_X <= 0;
-        final_dividend_reg <= 0;
-        final_sign_reg <= 0;
+        s7_DX2 <= 0;
+        s7_X1 <= 0;
+        s7_sign <= 0;
+        s7_dividend <= 0;
     end else begin
-        // Now s6_DX2 is available from previous cycle
-        final_X <= (s6_X1 * ((2 << 16) - s6_DX2[47:16]));  // X2 = X1 * (2 - D*X1)
-        final_dividend_reg <= final_dividend;
-        final_sign_reg <= final_sign;
+        s7_DX2 <= s6_divisor * s6_X1[47:16];  // D * X1
+        s7_X1 <= s6_X1[47:16];
+        s7_sign <= s6_sign;
+        s7_dividend <= s6_dividend;
     end
 end
 
-reg final_sign_reg2;
-// Stage S7: Output Q = N * X_final_iter
+// Stage S7: NR iteration 2 Part 2a - Compute (2 - D*X1)
+reg [31:0] s8_two_minus_dx2;
+reg [31:0] s8_X1;
+reg [39:0] s8_dividend;
+reg s8_sign;
+
+always @(posedge clk) begin
+    if (!reset) begin
+        s8_two_minus_dx2 <= 0;
+        s8_X1 <= 0;
+        s8_dividend <= 0;
+        s8_sign <= 0;
+    end else begin
+        s8_two_minus_dx2 <= (32'd131072) - s7_DX2[47:16];  // 2 - D*X1
+        s8_X1 <= s7_X1;
+        s8_dividend <= s7_dividend;
+        s8_sign <= s7_sign;
+    end
+end
+
+// Stage S8: NR iteration 2 Part 2b - Compute X2 = X1 * (2 - D*X1)
+reg [63:0] s9_X2;
+reg [39:0] s9_dividend;
+reg s9_sign;
+
+always @(posedge clk) begin
+    if (!reset) begin
+        s9_X2 <= 0;
+        s9_dividend <= 0;
+        s9_sign <= 0;
+    end else begin
+        s9_X2 <= s8_X1 * s8_two_minus_dx2;  // X2 = X1 * (2 - D*X1)
+        s9_dividend <= s8_dividend;
+        s9_sign <= s8_sign;
+    end
+end
+
+// Stage S9: Output Q = N * X_final_iter
 reg [71:0] Q;
+reg final_sign;
+
 always @(posedge clk) begin
     if (!reset) begin
         Q <= 0;
-        final_sign_reg2 <= 0;
+        final_sign <= 0;
     end else begin
-        Q <= final_dividend_reg * final_X[47:16];
-        final_sign_reg2 <= final_sign_reg;
+        Q <= s9_dividend * s9_X2[47:16];
+        final_sign <= s9_sign;
     end
 end
 
 wire [39:0] abs_q = Q[55:16]; 
-assign quo_data = final_sign_reg2 ? -abs_q : abs_q;
+assign quo_data = final_sign ? -abs_q : abs_q;
 
 endmodule
 

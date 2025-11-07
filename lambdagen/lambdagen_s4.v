@@ -23,11 +23,11 @@ module lambdagen_s4 #(
     parameter FRAC = 8;
     integer i;
 
-    reg valid_d [0:6];
-    reg [IDWIDTH-1:0] tID_s4_latch [0:6];
-    reg signed [ZWIDTH-1:0] z1_s4_latch [0:6];
-    reg signed [ZWIDTH-1:0] z2_s4_latch [0:6];
-    reg signed [ZWIDTH-1:0] z3_s4_latch [0:6];
+    reg valid_d [0:8];
+    reg [IDWIDTH-1:0] tID_s4_latch [0:8];
+    reg signed [ZWIDTH-1:0] z1_s4_latch [0:8];
+    reg signed [ZWIDTH-1:0] z2_s4_latch [0:8];
+    reg signed [ZWIDTH-1:0] z3_s4_latch [0:8];
     
     wire signed [39:0] quo1, quo2, quo3, quo4, quo5, quo6;
 
@@ -50,7 +50,7 @@ module lambdagen_s4 #(
         .reset        (~rst),
         .input_valid  (valid),
         .divisor_data (area_s3),
-        .dividend_data(E1_s3),
+        .dividend_data({8'b0, E1_s3}),
         .quo_valid    (divValid1),
         .quo_data     (quo1)
     );
@@ -60,7 +60,7 @@ module lambdagen_s4 #(
         .reset        (~rst),
         .input_valid  (valid),
         .divisor_data (area_s3),
-        .dividend_data(E2_s3),
+        .dividend_data({8'b0, E2_s3}),
         .quo_valid    (divValid2),
         .quo_data     (quo2)
     );
@@ -70,7 +70,7 @@ module lambdagen_s4 #(
         .reset        (~rst),
         .input_valid  (valid),
         .divisor_data (area_s3),
-        .dividend_data(dl2x_ext),
+        .dividend_data({8'b0, dl2x_ext}),
         .quo_valid    (divValid3),
         .quo_data     (quo3)
     );
@@ -80,7 +80,7 @@ module lambdagen_s4 #(
         .reset        (~rst),
         .input_valid  (valid),
         .divisor_data (area_s3),
-        .dividend_data(dl1x_ext),
+        .dividend_data({8'b0, dl1x_ext}),
         .quo_valid    (divValid4),
         .quo_data     (quo4)
     );
@@ -90,7 +90,7 @@ module lambdagen_s4 #(
         .reset        (~rst),
         .input_valid  (valid),
         .divisor_data (area_s3),
-        .dividend_data(dl2y_ext),
+        .dividend_data({8'b0, dl2y_ext}),
         .quo_valid    (divValid5),
         .quo_data     (quo5)
     );
@@ -100,20 +100,10 @@ module lambdagen_s4 #(
         .reset        (~rst),
         .input_valid  (valid),
         .divisor_data (area_s3),
-        .dividend_data(dl1y_ext),
+        .dividend_data({8'b0, dl1y_ext}),
         .quo_valid    (divValid6),
         .quo_data     (quo6)
     );
-
-    function any_valid_d;
-        integer j;
-        begin
-            any_valid_d = 1'b0;
-            for (j = 0; j < 7; j = j + 1) begin
-                any_valid_d = any_valid_d | valid_d[j];
-            end
-        end
-    endfunction
 
     always @ (posedge clk) begin
         if (rst) begin
@@ -129,7 +119,7 @@ module lambdagen_s4 #(
             z2_s4   <= 0;
             z3_s4   <= 0;
             
-            for (i = 0; i < 7; i = i + 1) begin
+            for (i = 0; i < 9; i = i + 1) begin
                 valid_d[i] <= 0;
                 tID_s4_latch[i] <= 0;
                 z1_s4_latch[i] <= 0;
@@ -138,14 +128,14 @@ module lambdagen_s4 #(
             end
         end
         else if (!stall) begin
-            if (valid || any_valid_d()) begin
+            if (valid || valid_d[0] || valid_d[1] || valid_d[2] || valid_d[3] || valid_d[4] || valid_d[5] || valid_d[6] || valid_d[7] || valid_d[8]) begin
                 tID_s4_latch[0] <= tID_s3;
                 z1_s4_latch[0] <= z1_s3;
                 z2_s4_latch[0] <= z2_s3;
                 z3_s4_latch[0] <= z3_s3;
                 valid_d[0] <= valid;
 
-                for (i = 1; i < 7; i = i + 1) begin
+                for (i = 1; i < 9; i = i + 1) begin
                     valid_d[i] <= valid_d[i-1];
                     tID_s4_latch[i] <= tID_s4_latch[i-1];
                     z1_s4_latch[i] <= z1_s4_latch[i-1];
@@ -161,10 +151,10 @@ module lambdagen_s4 #(
             dl1y_s4 <= quo6[39:8];
             dl2y_s4 <= quo5[39:8];
             
-            tID_s4 <= tID_s4_latch[6];
-            z1_s4 <= z1_s4_latch[6];
-            z2_s4 <= z2_s4_latch[6];
-            z3_s4 <= z3_s4_latch[6];
+            tID_s4 <= tID_s4_latch[8];
+            z1_s4 <= z1_s4_latch[8];
+            z2_s4 <= z2_s4_latch[8];
+            z3_s4 <= z3_s4_latch[8];
         end
         else if (stall) begin
             ovalid <= 1'b1;
