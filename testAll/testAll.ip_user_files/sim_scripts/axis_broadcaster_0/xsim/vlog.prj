@@ -1,0 +1,9 @@
+verilog xil_defaultlib --include "../../../ipstatic/hdl" \
+"../../../../testAll.gen/sources_1/ip/axis_broadcaster_0/hdl/tdata_axis_broadcaster_0.v" \
+"../../../../testAll.gen/sources_1/ip/axis_broadcaster_0/hdl/tuser_axis_broadcaster_0.v" \
+"../../../../testAll.gen/sources_1/ip/axis_broadcaster_0/hdl/top_axis_broadcaster_0.v" \
+"../../../../testAll.gen/sources_1/ip/axis_broadcaster_0/sim/axis_broadcaster_0.v" \
+
+verilog xil_defaultlib "glbl.v"
+
+nosort
