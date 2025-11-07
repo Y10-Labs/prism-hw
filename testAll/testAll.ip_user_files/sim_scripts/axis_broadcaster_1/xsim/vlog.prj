@@ -1,0 +1,9 @@
+verilog xil_defaultlib --include "C:/Xilinx/Vivado/2020.2/data/xilinx_vip/include" --include "../../../ipstatic/hdl" \
+"../../../../testAll.gen/sources_1/ip/axis_broadcaster_1/hdl/tdata_axis_broadcaster_1.v" \
+"../../../../testAll.gen/sources_1/ip/axis_broadcaster_1/hdl/tuser_axis_broadcaster_1.v" \
+"../../../../testAll.gen/sources_1/ip/axis_broadcaster_1/hdl/top_axis_broadcaster_1.v" \
+"../../../../testAll.gen/sources_1/ip/axis_broadcaster_1/sim/axis_broadcaster_1.v" \
+
+verilog xil_defaultlib "glbl.v"
+
+nosort
