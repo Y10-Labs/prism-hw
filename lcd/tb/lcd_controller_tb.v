@@ -32,9 +32,9 @@ module lcd_controller_tb;
         .V_ACTIVE(V_ACTIVE), .V_FRONT(V_FRONT), .V_SYNC(V_SYNC), .V_BACK(V_BACK),
         .VDD_WAIT_CYCLES(VDD_WAIT), .BLANK_FRAMES(BLANK_FRAMES),
         .DISP_FRAMES(DISP_FRAMES), .OFF_FRAMES(OFF_FRAMES),
-        .TEST_PATTERN(1'b1), .CLK_INVERT(1'b1)
+        .TEST_PATTERN(1'b1)
     ) dut (
-        .clk(clk), .rst_n(rst_n), .i_enable(enable),
+        .clk(clk), .rst_n(rst_n), .i_enable(enable), .i_clk_invert(1'b1),
         .o_x(x), .o_y(y), .o_active(active), .i_pixel(24'd0),
         .o_clk(dclk), .o_hsync(hsync), .o_vsync(vsync), .o_de(de), .o_disp(disp),
         .o_red(red), .o_green(green), .o_blue(blue),

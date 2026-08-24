@@ -25,30 +25,52 @@
 `default_nettype none
 
 module lcd_controller #(
-    // 1056 x 525 @ 33.264 MHz = 60.0 Hz
+    // 832 x 500 @ 25.000 MHz = 60.1 Hz.
+    //
+    // These come from the ST7262 datasheet section 7.3.4, NOT from the
+    // CH500WV05A-T module datasheet, which is wrong about this: the module
+    // sheet claims Fclk typ 40 MHz / max 50 MHz, while the driver IC actually
+    // inside it specifies 23 / 25 / 27 MHz.  Everything below sits inside the
+    // IC's limits:
+    //
+    //   Fclk  23   25    27  MHz     -> 25.000
+    //   Th    808  816  896  DCLK    -> 832   (Thbp + 800 + Thfp)
+    //   Thbp  4    8    48   DCLK    -> 16    (H_SYNC + H_BACK; Thbp
+    //                                          INCLUDES the sync pulse)
+    //   Thfp  4    8    48   DCLK    -> 16
+    //   Thw   2    4    8    DCLK    -> 4
+    //   Tv    488  496  504  HSYNC   -> 500   (Tvbp + 480 + Tvfp)
+    //   Tvbp  4    8    12   HSYNC   -> 10    (V_SYNC + V_BACK)
+    //   Tvfp  4    8    12   HSYNC   -> 10
+    //   Tvw   2    4    8    HSYNC   -> 4
+    //
+    // 25e6 / (832 * 500) = 60.096 Hz.
     parameter integer H_ACTIVE = 800,
-    parameter integer H_FRONT  = 40,
-    parameter integer H_SYNC   = 48,
-    parameter integer H_BACK   = 168,
+    parameter integer H_FRONT  = 16,   // Thfp
+    parameter integer H_SYNC   = 4,    // Thw
+    parameter integer H_BACK   = 12,   // Thbp - Thw
 
     parameter integer V_ACTIVE = 480,
-    parameter integer V_FRONT  = 13,
-    parameter integer V_SYNC   = 3,
-    parameter integer V_BACK   = 29,
+    parameter integer V_FRONT  = 10,   // Tvfp
+    parameter integer V_SYNC   = 4,    // Tvw
+    parameter integer V_BACK   = 6,    // Tvbp - Tvw
 
-    // power sequencing, see lcd_power_seq.v for what is and is not from the
-    // datasheet
-    parameter integer VDD_WAIT_CYCLES = 332640,   // 10 ms @ 33.264 MHz
+    // Power sequencing, from ST7262 section 11 (the module datasheet gives no
+    // numbers at all for this).  At 25 MHz a frame is 16.64 ms.
+    //   T1 >= 10 ms   reset high -> DISP high
+    //   T2 >= 250 ms  display signal out -> backlight on   (16 frames = 266 ms)
+    //   off: >= 5 ms  backlight off -> DISP low
+    parameter integer VDD_WAIT_CYCLES = 250000,   // 10 ms @ 25 MHz
     parameter integer BLANK_FRAMES    = 2,
-    parameter integer DISP_FRAMES     = 10,
-    parameter integer OFF_FRAMES      = 2,
+    parameter integer DISP_FRAMES     = 16,       // 266 ms, T2 needs >= 250 ms
+    parameter integer OFF_FRAMES      = 2,        // 33 ms, off-T0 needs >= 5 ms
 
-    parameter         TEST_PATTERN    = 1'b1,
-    parameter         CLK_INVERT      = 1'b1     // DCLK 180 deg from clk
+    parameter         TEST_PATTERN    = 1'b1
 )(
-    input  wire clk,        // pixel clock, 33.264 MHz for the defaults above
+    input  wire clk,          // pixel clock, 25.000 MHz for the defaults above
     input  wire rst_n,
-    input  wire i_enable,   // high brings the panel up, low takes it down
+    input  wire i_enable,     // high brings the panel up, low takes it down
+    input  wire i_clk_invert, // DCLK polarity; see lcd_clock_out.v
 
     // external pixel source (ignored when TEST_PATTERN = 1)
     output wire [11:0] o_x,
@@ -110,10 +132,11 @@ module lcd_controller #(
         .o_ready       (o_ready)
     );
 
-    lcd_clock_out #(.INVERT (CLK_INVERT)) u_clk_out (
-        .clk   (clk),
-        .rst_n (rst_n),
-        .o_clk (o_clk)
+    lcd_clock_out u_clk_out (
+        .clk      (clk),
+        .rst_n    (rst_n),
+        .i_invert (i_clk_invert),
+        .o_clk    (o_clk)
     );
 
     // ---- pixel source -----------------------------------------------------

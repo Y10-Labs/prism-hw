@@ -1,14 +1,25 @@
 // ---------------------------------------------------------------------------
 // lcd_power_seq - power-up / power-down sequencer for the CH500WV05A-T
 //
-// IMPORTANT: the panel datasheet (SPEC-CH500WV05A-T V0) documents its INTERNAL
-// rail order only (VDD -> VEE -> VGH on, reverse off) and gives NO numeric
-// values for any of the intervals it names.  It says nothing whatsoever about
-// the ordering of DISP / DCLK / DE / backlight.  The sequence below is the
-// standard convention for DE-mode RGB TFTs, not a datasheet-verified figure.
-// Treat every delay here as a starting point to tune on real hardware.
+// The module datasheet (SPEC-CH500WV05A-T V0) is useless here: it documents
+// only the panel's INTERNAL rail order (VDD -> VEE -> VGH), names six
+// intervals without giving a value for any, and says nothing about DISP /
+// DCLK / DE / backlight ordering.  The ST7262 driver IC datasheet section 11
+// does specify it, and these are its numbers:
 //
-// The one rule that IS from the datasheet is Absolute Maximum Ratings:
+//   T0      system power stable -> GRB reset         >= 0   ms
+//   T1      GRB reset high -> DISP high              >= 10  ms
+//   T2      display signal out -> backlight on       >= 250 ms
+//   off T0  backlight off -> DISP low                >= 5   ms
+//   off T1  DISP low -> internal discharge complete  >= 100 ms
+//
+// T2 is the one that matters most: 250 ms of valid timing with DISP already
+// high before the backlight comes on is what stops a white flash at turn-on.
+//
+// off T1 cannot be enforced from the PL - it is a constraint on whoever
+// removes board power after DISP drops.
+//
+// Absolute Maximum Ratings still bound everything:
 //   Vin = -0.3 V .. VDD+0.3 V
 // i.e. never drive a panel input before VDD is up or after it is down.  On the
 // Prism board this is structurally satisfied: panel VDD (J701.4) and the Zynq

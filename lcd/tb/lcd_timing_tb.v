@@ -6,16 +6,26 @@
 
 module lcd_timing_tb;
 
-    localparam integer H_ACTIVE = 800, H_FRONT = 40, H_SYNC = 48, H_BACK = 168;
-    localparam integer V_ACTIVE = 480, V_FRONT = 13, V_SYNC = 3,  V_BACK = 29;
-    localparam integer H_TOTAL  = H_ACTIVE + H_FRONT + H_SYNC + H_BACK; // 1056
-    localparam integer V_TOTAL  = V_ACTIVE + V_FRONT + V_SYNC + V_BACK; // 525
-    localparam integer FRAME    = H_TOTAL * V_TOTAL;                    // 554400
+    localparam integer H_ACTIVE = 800, H_FRONT = 16, H_SYNC = 4, H_BACK = 12;
+    localparam integer V_ACTIVE = 480, V_FRONT = 10, V_SYNC = 4, V_BACK = 6;
+    localparam integer H_TOTAL  = H_ACTIVE + H_FRONT + H_SYNC + H_BACK; // 832
+    localparam integer V_TOTAL  = V_ACTIVE + V_FRONT + V_SYNC + V_BACK; // 500
+    localparam integer FRAME    = H_TOTAL * V_TOTAL;                    // 416000
 
-    // 33.264 MHz -> 30.0625 ns.  Use 30 ns; the ratios under test are exact
-    // in clock counts, not nanoseconds.
+    // 25.000 MHz -> 40 ns
     reg clk = 1'b0;
-    always #15 clk = ~clk;
+    always #20 clk = ~clk;
+
+    // ---- ST7262 section 7.3.4 limits, in the datasheet's own terms.
+    // Note Thbp/Tvbp INCLUDE the sync pulse, hence the H_SYNC + H_BACK sums.
+    localparam integer DS_Th_MIN = 808, DS_Th_MAX = 896;
+    localparam integer DS_Tv_MIN = 488, DS_Tv_MAX = 504;
+    localparam integer DS_HBP_MIN = 4, DS_HBP_MAX = 48;
+    localparam integer DS_HFP_MIN = 4, DS_HFP_MAX = 48;
+    localparam integer DS_HW_MIN  = 2, DS_HW_MAX  = 8;
+    localparam integer DS_VBP_MIN = 4, DS_VBP_MAX = 12;
+    localparam integer DS_VFP_MIN = 4, DS_VFP_MAX = 12;
+    localparam integer DS_VW_MIN  = 2, DS_VW_MAX  = 8;
 
     reg rst_n  = 1'b0;
     reg enable = 1'b0;
@@ -141,6 +151,16 @@ module lcd_timing_tb;
         $display("   vsync width errors    : %0d  (of %0d pulses)", bad_vs_width, vs_pulses);
         $display("   max DE-low gap        : %0d clocks  (panel needs >= 2048)", max_vblank_gap);
         $display("   min inter-line DE gap : %0d clocks  (must stay < 2048)", min_interline_gap);
+
+        // ---- the configured mode must be inside the ST7262's limits ----
+        check(H_TOTAL >= DS_Th_MIN && H_TOTAL <= DS_Th_MAX,   "Th out of ST7262 range 808..896 DCLK");
+        check(V_TOTAL >= DS_Tv_MIN && V_TOTAL <= DS_Tv_MAX,   "Tv out of ST7262 range 488..504 HSYNC");
+        check((H_SYNC + H_BACK) >= DS_HBP_MIN && (H_SYNC + H_BACK) <= DS_HBP_MAX, "Thbp out of range 4..48 DCLK");
+        check(H_FRONT >= DS_HFP_MIN && H_FRONT <= DS_HFP_MAX, "Thfp out of range 4..48 DCLK");
+        check(H_SYNC  >= DS_HW_MIN  && H_SYNC  <= DS_HW_MAX,  "Thw out of range 2..8 DCLK");
+        check((V_SYNC + V_BACK) >= DS_VBP_MIN && (V_SYNC + V_BACK) <= DS_VBP_MAX, "Tvbp out of range 4..12 HSYNC");
+        check(V_FRONT >= DS_VFP_MIN && V_FRONT <= DS_VFP_MAX, "Tvfp out of range 4..12 HSYNC");
+        check(V_SYNC  >= DS_VW_MIN  && V_SYNC  <= DS_VW_MAX,  "Tvw out of range 2..8 HSYNC");
 
         check(frames_done   >= 2,    "fewer than 2 complete frames observed");
         check(bad_line_len  == 0,    "some lines did not have H_ACTIVE DE clocks");
