@@ -1,0 +1,6 @@
+# simulation and synthesis artefacts
+build/
+*.vcd
+*.jou
+*.log
+.Xil/
