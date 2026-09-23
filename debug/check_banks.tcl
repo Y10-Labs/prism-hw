@@ -38,9 +38,10 @@ foreach p $pins {
     }
 }
 
-# VCCO for bank 13 must be 3.3 V for LVCMOS33 to be legal.
-puts ""
-puts "bank 13 VCCO requirement: [get_property VCCO [get_iobanks 13]]"
+# VCCO for bank 13 must be 3.3 V for LVCMOS33 to be legal.  iobank objects
+# have no VCCO property (Vivado 2025.1 errors on it); implementation DRC
+# already rejects an IOSTANDARD mix a bank's VCCO cannot support, and the
+# board ties VCCO_13 to +3V3 (see lcd/xdc/prism_lcd_pins.xdc).
 
 if {$bad} {
     puts "\n$bad PROBLEM(S)"

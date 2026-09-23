@@ -1,16 +1,18 @@
-// Self-checking testbench for lcd_timing at the real 1056 x 525 @ 60 Hz mode.
-// Every check is an assertion; the run fails loudly rather than needing eyes
-// on a waveform.
+// Self-checking testbench for lcd_timing.  Defaults to the real 832 x 500 @
+// 25 MHz mode; the Makefile reruns it with -P overrides for other modes and
+// polarities, since the mode is a runtime input.  Every check is an
+// assertion; the run fails loudly rather than needing eyes on a waveform.
 `timescale 1ns/1ps
 `default_nettype none
 
 module lcd_timing_tb;
 
-    localparam integer H_ACTIVE = 800, H_FRONT = 16, H_SYNC = 4, H_BACK = 12;
-    localparam integer V_ACTIVE = 480, V_FRONT = 10, V_SYNC = 4, V_BACK = 6;
-    localparam integer H_TOTAL  = H_ACTIVE + H_FRONT + H_SYNC + H_BACK; // 832
-    localparam integer V_TOTAL  = V_ACTIVE + V_FRONT + V_SYNC + V_BACK; // 500
-    localparam integer FRAME    = H_TOTAL * V_TOTAL;                    // 416000
+    parameter integer H_ACTIVE = 800, H_FRONT = 16, H_SYNC = 4, H_BACK = 12;
+    parameter integer V_ACTIVE = 480, V_FRONT = 10, V_SYNC = 4, V_BACK = 6;
+    parameter         SYNC_AL  = 1;   // 1 = active-low syncs
+    localparam integer H_TOTAL  = H_ACTIVE + H_FRONT + H_SYNC + H_BACK;
+    localparam integer V_TOTAL  = V_ACTIVE + V_FRONT + V_SYNC + V_BACK;
+    localparam integer FRAME    = H_TOTAL * V_TOTAL;
 
     // 25.000 MHz -> 40 ns
     reg clk = 1'b0;
@@ -33,15 +35,23 @@ module lcd_timing_tb;
     wire [11:0] x, y;
     wire        active, hsync, vsync, de, frame_start;
 
-    lcd_timing #(
-        .H_ACTIVE(H_ACTIVE), .H_FRONT(H_FRONT), .H_SYNC(H_SYNC), .H_BACK(H_BACK),
-        .V_ACTIVE(V_ACTIVE), .V_FRONT(V_FRONT), .V_SYNC(V_SYNC), .V_BACK(V_BACK),
-        .SYNC_ACTIVE_LOW(1'b1)
-    ) dut (
+    wire hsync_pin, vsync_pin;
+
+    lcd_timing dut (
         .clk(clk), .rst_n(rst_n), .i_enable(enable),
+        .i_h_active(H_ACTIVE[11:0]), .i_h_front(H_FRONT[11:0]),
+        .i_h_sync(H_SYNC[11:0]),     .i_h_back(H_BACK[11:0]),
+        .i_v_active(V_ACTIVE[11:0]), .i_v_front(V_FRONT[11:0]),
+        .i_v_sync(V_SYNC[11:0]),     .i_v_back(V_BACK[11:0]),
+        .i_hs_active_low(SYNC_AL[0]), .i_vs_active_low(SYNC_AL[0]),
+        .i_de_active_low(1'b0),
         .o_x(x), .o_y(y), .o_active(active),
-        .o_hsync(hsync), .o_vsync(vsync), .o_de(de), .o_frame_start(frame_start)
+        .o_hsync(hsync_pin), .o_vsync(vsync_pin), .o_de(de), .o_frame_start(frame_start)
     );
+
+    // measure in active-low terms whatever the pin polarity
+    assign hsync = hsync_pin ^ ~SYNC_AL[0];
+    assign vsync = vsync_pin ^ ~SYNC_AL[0];
 
     integer errors = 0;
     task check(input cond, input [1023:0] msg);
@@ -132,8 +142,8 @@ module lcd_timing_tb;
     end
 
     initial begin
-        $display("== lcd_timing_tb : %0d x %0d, frame = %0d clocks ==",
-                 H_TOTAL, V_TOTAL, FRAME);
+        $display("== lcd_timing_tb : %0d x %0d, frame = %0d clocks, syncs active %0s ==",
+                 H_TOTAL, V_TOTAL, FRAME, SYNC_AL ? " low" : "high");
         repeat (10) @(posedge clk);
         rst_n = 1'b1;
         repeat (10) @(posedge clk);

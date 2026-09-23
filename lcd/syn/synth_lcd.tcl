@@ -28,7 +28,7 @@ read_verilog [list \
 
 # LCD_USE_ODDR swaps the behavioural clock forward for a real ODDR primitive.
 synth_design -top lcd_bringup_top -part $part -verilog_define LCD_USE_ODDR \
-             -flatten_hierarchy none
+             -include_dirs [file join $lcd_dir rtl] -flatten_hierarchy none
 
 # Pin constraints only apply to the board they were written for.
 if {[string match "*clg484*" $part]} {

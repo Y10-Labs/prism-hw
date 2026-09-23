@@ -16,9 +16,14 @@
 // Making this switchable at runtime means the polarity can be flipped during
 // bring-up without a rebuild.
 //
-// i_invert = 1 forwards a clock 180 degrees out of phase with `clk`.  Pixel
-// data is registered on the rising edge of `clk`, so DCLK's rising edge lands
-// in the middle of the data eye.
+// i_invert = 0 forwards `clk` as is: data changes on DCLK's rising edge and
+// DCLK's FALLING edge lands mid-eye.  That is what the Prism panel needs - it
+// was measured to latch on the falling edge (DCLKPOL = 1), so 0 is the default
+// (lcd_defaults.vh).  i_invert = 1 forwards a clock 180 degrees out of phase,
+// centring the RISING edge instead, for a panel strapped the other way.
+//
+// i_force = 1 parks DCLK statically at i_force_val (pin-override mode, for
+// checking the trace with a meter).
 //
 // Define LCD_USE_ODDR for synthesis (the Vivado script does); simulators get
 // the behavioural version.
@@ -30,11 +35,16 @@ module lcd_clock_out (
     input  wire clk,
     input  wire rst_n,
     input  wire i_invert,
+    input  wire i_force,
+    input  wire i_force_val,
     output wire o_clk
 );
 
 `ifdef LCD_USE_ODDR
     // D1 is driven while clk is high, D2 while clk is low.
+    wire d1 = i_force ? i_force_val : ~i_invert;
+    wire d2 = i_force ? i_force_val :  i_invert;
+
     ODDR #(
         .DDR_CLK_EDGE ("SAME_EDGE"),
         .INIT         (1'b0),
@@ -43,13 +53,13 @@ module lcd_clock_out (
         .Q  (o_clk),
         .C  (clk),
         .CE (1'b1),
-        .D1 (~i_invert),
-        .D2 ( i_invert),
+        .D1 (d1),
+        .D2 (d2),
         .R  (~rst_n),
         .S  (1'b0)
     );
 `else
-    assign o_clk = i_invert ? ~clk : clk;
+    assign o_clk = i_force ? i_force_val : (i_invert ? ~clk : clk);
 `endif
 
 endmodule

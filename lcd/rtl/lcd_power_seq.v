@@ -31,27 +31,29 @@
 
 `default_nettype none
 
-module lcd_power_seq #(
-    // Cycles to wait after reset for the panel's internal VDD->VEE->VGH ramp.
-    // Default 332_640 = 10 ms at 33.264 MHz.
-    parameter integer VDD_WAIT_CYCLES = 332640,
-    // Frames of valid blank timing before DISP is asserted.
-    parameter integer BLANK_FRAMES    = 2,
-    // Frames after DISP before the backlight is enabled (stops the white flash).
-    parameter integer DISP_FRAMES     = 10,
-    // Frames after the backlight is cut before DISP drops, on the way down.
-    parameter integer OFF_FRAMES      = 2
-)(
+module lcd_power_seq (
     input  wire clk,
     input  wire rst_n,
     input  wire i_enable,       // high = bring the panel up, low = take it down
     input  wire i_frame_start,  // one-cycle pulse per frame from lcd_timing
 
+    // Sequence lengths.  Runtime inputs so they can be stretched from software
+    // while debugging a panel that flashes or will not come up.
+    //   i_vdd_wait    clocks after enable before timing starts (T1, >= 10 ms)
+    //   i_blank_frames frames of valid, black timing before DISP rises
+    //   i_disp_frames  frames after DISP before the backlight (T2, >= 250 ms)
+    //   i_off_frames   frames between each tear-down step (off-T0, >= 5 ms)
+    input  wire [23:0] i_vdd_wait,
+    input  wire [7:0]  i_blank_frames,
+    input  wire [7:0]  i_disp_frames,
+    input  wire [7:0]  i_off_frames,
+
     output reg  o_timing_en,    // run the timing generator
     output reg  o_blank,        // force pixel data to black
     output reg  o_disp,         // panel DISP pin (J701.31)
     output reg  o_bl_en,        // backlight boost enable (MT3608 EN)
-    output wire o_ready         // sequence complete, pixels are being shown
+    output wire o_ready,        // sequence complete, pixels are being shown
+    output wire [2:0] o_state   // for status readback
 );
 
     localparam [2:0] S_OFF       = 3'd0,
@@ -62,14 +64,8 @@ module lcd_power_seq #(
                      S_BL_OFF    = 3'd5,
                      S_DISP_OFF  = 3'd6;
 
-    localparam integer CW = (VDD_WAIT_CYCLES <= 2) ? 1 : $clog2(VDD_WAIT_CYCLES);
-    localparam integer MAXF = (BLANK_FRAMES > DISP_FRAMES)
-                              ? ((BLANK_FRAMES > OFF_FRAMES) ? BLANK_FRAMES : OFF_FRAMES)
-                              : ((DISP_FRAMES > OFF_FRAMES) ? DISP_FRAMES  : OFF_FRAMES);
-    // +1 headroom: the counter is compared against MAXF itself, not MAXF-1,
-    // because the first i_frame_start marks the start of a frame rather than
-    // the end of one.
-    localparam integer FW = (MAXF <= 2) ? 3 : ($clog2(MAXF) + 2);
+    localparam integer CW = 24;
+    localparam integer FW = 9;   // 8-bit counts + 1 bit headroom
 
     // Counting convention: i_frame_start pulses at the START of a frame, so a
     // state entered asynchronously seeds frame_cnt at 0, while a state entered
@@ -80,6 +76,7 @@ module lcd_power_seq #(
     reg [FW-1:0] frame_cnt;
 
     assign o_ready = (state == S_RUN);
+    assign o_state = state;
 
     always @(posedge clk) begin
         if (!rst_n) begin
@@ -99,7 +96,7 @@ module lcd_power_seq #(
                 // let the panel finish its own VDD -> VEE -> VGH ramp
                 S_VDD_WAIT: begin
                     if (!i_enable) state <= S_OFF;
-                    else if (wait_cnt >= VDD_WAIT_CYCLES - 1) begin
+                    else if (wait_cnt + 1'b1 >= i_vdd_wait) begin
                         wait_cnt  <= {CW{1'b0}};
                         frame_cnt <= {FW{1'b0}};
                         state     <= S_BLANK;
@@ -111,7 +108,7 @@ module lcd_power_seq #(
                 S_BLANK: begin
                     if (!i_enable) state <= S_OFF;
                     else if (i_frame_start) begin
-                        if (frame_cnt >= BLANK_FRAMES) begin
+                        if (frame_cnt >= i_blank_frames) begin
                             frame_cnt <= {{(FW-1){1'b0}}, 1'b1};  // this pulse counts
                             state     <= S_DISP_WAIT;
                         end
@@ -123,7 +120,7 @@ module lcd_power_seq #(
                 S_DISP_WAIT: begin
                     if (!i_enable) state <= S_BL_OFF;
                     else if (i_frame_start) begin
-                        if (frame_cnt >= DISP_FRAMES) begin
+                        if (frame_cnt >= i_disp_frames) begin
                             frame_cnt <= {FW{1'b0}};
                             state     <= S_RUN;
                         end
@@ -141,7 +138,7 @@ module lcd_power_seq #(
                 // collapses, then DISP, and only then does timing stop.
                 S_BL_OFF: begin
                     if (i_frame_start) begin
-                        if (frame_cnt >= OFF_FRAMES) begin
+                        if (frame_cnt >= i_off_frames) begin
                             frame_cnt <= {{(FW-1){1'b0}}, 1'b1};  // this pulse counts
                             state     <= S_DISP_OFF;
                         end
@@ -151,7 +148,7 @@ module lcd_power_seq #(
 
                 S_DISP_OFF: begin
                     if (i_frame_start) begin
-                        if (frame_cnt >= OFF_FRAMES) begin
+                        if (frame_cnt >= i_off_frames) begin
                             frame_cnt <= {FW{1'b0}};
                             state     <= S_OFF;
                         end

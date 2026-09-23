@@ -1,7 +1,8 @@
 // Self-checking testbench for the full lcd_controller, focused on the
 // power-up / power-down ORDER.  Uses a small frame and a short VDD wait so
 // the sequence completes quickly; the timing ratios are covered separately
-// by lcd_timing_tb at the real 1056 x 525.
+// by lcd_timing_tb at the real 832 x 500.  Also checks the bit-walk pattern
+// and the raw pin override.
 `timescale 1ns/1ps
 `default_nettype none
 
@@ -22,23 +23,31 @@ module lcd_controller_tb;
     always #15 clk = ~clk;
 
     reg rst_n = 1'b0, enable = 1'b0;
+    reg [3:0]  pattern  = 4'd0;
+    reg [7:0]  pat_arg  = 8'd0;
+    reg        pin_ovr  = 1'b0;
+    reg [29:0] pin_val  = 30'd0;
 
     wire [11:0] x, y;
     wire        active, dclk, hsync, vsync, de, disp, bl_en, ready;
     wire [7:0]  red, green, blue;
 
-    lcd_controller #(
-        .H_ACTIVE(H_ACTIVE), .H_FRONT(H_FRONT), .H_SYNC(H_SYNC), .H_BACK(H_BACK),
-        .V_ACTIVE(V_ACTIVE), .V_FRONT(V_FRONT), .V_SYNC(V_SYNC), .V_BACK(V_BACK),
-        .VDD_WAIT_CYCLES(VDD_WAIT), .BLANK_FRAMES(BLANK_FRAMES),
-        .DISP_FRAMES(DISP_FRAMES), .OFF_FRAMES(OFF_FRAMES),
-        .TEST_PATTERN(1'b1)
-    ) dut (
-        .clk(clk), .rst_n(rst_n), .i_enable(enable), .i_clk_invert(1'b1),
+    lcd_controller dut (
+        .clk(clk), .rst_n(rst_n), .i_enable(enable), .i_clk_invert(1'b0),
+        .i_h_active(H_ACTIVE[11:0]), .i_h_front(H_FRONT[11:0]),
+        .i_h_sync(H_SYNC[11:0]),     .i_h_back(H_BACK[11:0]),
+        .i_v_active(V_ACTIVE[11:0]), .i_v_front(V_FRONT[11:0]),
+        .i_v_sync(V_SYNC[11:0]),     .i_v_back(V_BACK[11:0]),
+        .i_hs_active_low(1'b1), .i_vs_active_low(1'b1), .i_de_active_low(1'b0),
+        .i_de_only(1'b0),
+        .i_vdd_wait(VDD_WAIT[23:0]), .i_blank_frames(BLANK_FRAMES[7:0]),
+        .i_disp_frames(DISP_FRAMES[7:0]), .i_off_frames(OFF_FRAMES[7:0]),
+        .i_pattern(pattern), .i_pattern_arg(pat_arg), .i_solid(24'd0),
         .o_x(x), .o_y(y), .o_active(active), .i_pixel(24'd0),
+        .i_pin_override(pin_ovr), .i_pin_value(pin_val),
         .o_clk(dclk), .o_hsync(hsync), .o_vsync(vsync), .o_de(de), .o_disp(disp),
         .o_red(red), .o_green(green), .o_blue(blue),
-        .o_bl_en(bl_en), .o_ready(ready)
+        .o_bl_en(bl_en), .o_ready(ready), .o_seq_state(), .o_frame_start()
     );
 
     integer errors = 0;
@@ -60,6 +69,8 @@ module lcd_controller_tb;
     integer nonblack_before_bl   = 0;
     integer de_frames_before_disp = 0;
     integer de_frames_before_bl   = 0;
+
+    integer walk_bad = 0, walk_seen = 0, ovr_bad = 0;
 
     reg prev_disp = 1'b0, prev_bl = 1'b0, prev_de = 1'b0;
     reg prev_vs = 1'b1;
@@ -124,6 +135,36 @@ module lcd_controller_tb;
         $display("   t(first DE)=%0d  t(DISP^)=%0d  t(BL^)=%0d", t_first_de, t_disp_rise, t_bl_rise);
         $display("   blank frames before DISP=%0d  frames before BL=%0d",
                  de_frames_before_disp, de_frames_before_bl - de_frames_before_disp);
+
+        // ---- patterns, while running ----
+        // walk: every active pixel carries exactly one data bit
+        walk_bad = 0; walk_seen = 0;
+        pattern = 4'd2; pat_arg = 8'd13;           // walk: G5 only
+        repeat (FRAME * 2) @(posedge clk);         // let it apply
+        repeat (FRAME) @(posedge clk) begin
+            if (de) begin
+                walk_seen = walk_seen + 1;
+                if ({red, green, blue} != (24'd1 << 13)) walk_bad = walk_bad + 1;
+            end
+        end
+        check(walk_seen > 0,  "no DE while checking the walk pattern");
+        check(walk_bad == 0,  "walk pattern drove something other than bit 13");
+        pattern = 4'd0;
+
+        // raw pin override: every pin follows PIN_VALUE, DCLK parked
+        pin_val = {1'b1, 1'b0, 1'b1, 1'b0, 1'b1, 1'b1, 24'hA5C33C};
+        pin_ovr = 1'b1;
+        repeat (4) @(posedge clk);
+        repeat (20) @(posedge clk) begin
+            if ({bl_en, disp, de, vsync, hsync} != 5'b10101 ||
+                {red, green, blue} != 24'hA5C33C)
+                ovr_bad = ovr_bad + 1;
+        end
+        @(negedge clk); if (dclk !== 1'b1) ovr_bad = ovr_bad + 1;
+        @(posedge clk); #1; if (dclk !== 1'b1) ovr_bad = ovr_bad + 1;
+        check(ovr_bad == 0, "pin override did not drive the pins");
+        pin_ovr = 1'b0;
+        repeat (4) @(posedge clk);
 
         // ---- ordering on the way down ----
         enable = 1'b0;
