@@ -13,6 +13,69 @@ module does **not** bring them out: FPC pin 35 is NC and 37-40 are the
 touchscreen. So the panel runs entirely on its OTP / hardware-strap defaults
 and there is no way to configure or interrogate it.
 
+## Board quickstart
+
+These steps take a freshly powered Prism board to the panel running. The
+host tools are in `debug/` (see `debug/README.md`); `lcdctl.py` runs on the
+board.
+
+**What you need to know first:**
+- The console is `/dev/ttyUSB0`, 115200 8N1, root autologin. Only one process
+  can hold the port: close `screen`/`minicom` first. Host tools need
+  `pip install pyserial`.
+- **After every power-up the PL is empty.** Any access to
+  0x4000_0000-0xBFFF_FFFF before a bitstream is loaded hangs the board.
+  `lcdctl.py` checks this for you; raw `devmem` does not.
+- **Power-cycle; never `reboot`.** A software reboot on this board stops at
+  "Restarting system" and doesn't come back.
+- **Leave the SLCR unlocked.** Linux runs with it unlocked. If you poke SLCR
+  registers by hand, don't write the lock key (0x767B to 0xF8000004):
+  the FPGA manager's level-shifter enable then fails silently, and the PL
+  stays unreachable.
+
+**One time: reserve DDR for the frame buffers.** This is only needed for
+`fb` / `video` / `flip` / `anim`; test patterns work without it. On the board:
+
+```sh
+echo "bootargs=console=ttyPS0,115200 earlycon root=/dev/mmcblk0p2 ro rootwait mem=448M" \
+    > /run/media/BOOT-mmcblk0p1/uEnv.txt && sync
+# power-cycle, then check:
+grep "System RAM" /proc/iomem          # 00000000-1bffffff
+```
+
+Delete that `uEnv.txt` to undo. Details are in "Images from DDR" below.
+
+**Each session, on the host:**
+
+```sh
+make -C lcd                                           # all testbenches
+vivado -mode batch -source lcd/syn/build_debug.tcl    # -> lcd/build/debug/lcd_debug.bit.bin
+./lcd/sw/make_anim.py lcd/build/anim/loop32.anim      # optional: the 60 fps demo
+debug/uart_push.py --port /dev/ttyUSB0 lcd/build/debug/lcd_debug.bit.bin /home/root/lcd_debug.bit.bin
+debug/uart_push.py --port /dev/ttyUSB0 lcd/sw/lcdctl.py /home/root/lcdctl.py
+debug/uart_push.py --port /dev/ttyUSB0 lcd/build/anim/loop32.anim /home/root/loop32.anim
+```
+
+Rebuild or re-push only what changed: the files stay in `/home/root` across
+power cycles.
+
+**Each power-up, on the board** (`cd /home/root`):
+
+```sh
+python3 lcdctl.py load                 # FCLK1 = 25 MHz, fpgautil, checks ID "LCD1"
+python3 lcdctl.py on                   # power sequence -> colour bars, backlight on
+python3 lcdctl.py status               # 25.000 MHz, RUN, ~60 fps, limits OK
+python3 lcdctl.py pattern grid         # white border exactly on the panel edge
+
+python3 lcdctl.py anim load loop32.anim && python3 lcdctl.py anim play
+python3 lcdctl.py anim check           # expect 60.00 stores/s = panel fps, 0 skips
+```
+
+Then see "Debugging from PetaLinux" and "Images from DDR" below for every
+knob.
+
+## Files
+
 ```
 rtl/lcd_defaults.vh    the default mode + power sequence, in one place
 rtl/lcd_timing.v       H/V counters, DE, HSYNC/VSYNC, frame_start (runtime mode)
@@ -23,7 +86,6 @@ rtl/lcd_regs_axil.v    AXI4-Lite registers, CDC into the pixel domain
 rtl/lcd_debug_top.v    debug bitstream: PS7 + VDMA + registers + controller
 rtl/lcd_stream_src.v   AXI4-Stream video (VDMA MM2S) -> i_pixel, frame-aligned on SOF
 rtl/lcd_async_fifo.v   dual-clock first-word-fall-through FIFO (AXI -> pixel clock)
-sw/make_anim.py        host: N-frame animation as background + per-frame patches
 rtl/lcd_bringup_top.v  fixed-mode wrapper, defaults only (synth checks)
 tb/                    self-checking testbenches
 xdc/                   Prism board pin + timing constraints
@@ -32,6 +94,7 @@ syn/ps7_prism_config.tcl  the board's PS7 config (generated from the XSA)
 syn/synth_lcd.tcl      batch synth/impl of lcd_bringup_top for any part
 sw/lcdctl.py           runs on the board: drive every knob from the shell
 sw/make_test_images.py host: the two 800x480 XRGB test frames for the DDR path
+sw/make_anim.py        host: N-frame animation as background + per-frame patches
 ```
 
 ## Test

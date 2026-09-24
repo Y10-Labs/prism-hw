@@ -7,17 +7,41 @@ has the UART cable and Vivado**, not on a dev laptop.
 
 ## UART
 
-Start the logger once, leave it running for the whole session:
+The board's console is `/dev/ttyUSB0` at 115200 8N1, root autologin. Only
+**one** process can use the port at a time: close any `screen`/`minicom`
+session first (a root `sudo screen` needs `sudo kill`), and never run two of
+these tools at once - `uart_mon` and `uart_cmd` both read the port and would
+steal each other's bytes.
 
-    ./uart_mon.py --port /dev/ttyUSB0 --log /tmp/prism-uart.log &
+**Run a command** and print its output. The tool exits non-zero if the prompt
+never returns, so it works in scripts; use `--no-wait` for commands that
+never give the prompt back:
 
-Then issue commands.  Only `uart_mon` reads the port, so the two coexist:
+    ./uart_cmd.py --port /dev/ttyUSB0 'uname -a'
+    ./uart_cmd.py --port /dev/ttyUSB0 --timeout 60 'cd /home/root; python3 lcdctl.py status'
 
-    ./uart_cmd.py --port /dev/ttyUSB0 'devmem 0x41200000 32 0x1'
-    ./uart_cmd.py --port /dev/ttyUSB0 --timeout 60 'fpgautil -b /lib/firmware/prism.bit'
+**Copy a file to the board.** There's no network or SD card involved: the
+file is gzip + base64 here, decoded by python3 on the board (busybox has
+neither base64 nor xz), then sha256-checked. It moves about 8 KB/s of
+payload:
 
-`uart_cmd` exits non-zero if the prompt never returns, so it composes in a
-script.  Use `--no-wait` for commands that never give the prompt back.
+    ./uart_push.py --port /dev/ttyUSB0 ../lcd/build/debug/lcd_debug.bit.bin /home/root/lcd_debug.bit.bin
+    ./uart_push.py --port /dev/ttyUSB0 ../lcd/sw/lcdctl.py /home/root/lcdctl.py
+
+Stage bitstreams in `/home/root`, **not** `/lib/firmware`: `fpgautil -b`
+copies its argument into /lib/firmware and deletes that copy after loading,
+so a file that was already there is lost. Load with `lcdctl.py load` (see
+`lcd/README.md`), which also starts the pixel clock and checks the result.
+
+**Log everything**, e.g. across a power cycle, with nothing else using the
+port:
+
+    ./uart_mon.py --port /dev/ttyUSB0 --log /tmp/prism-uart.log
+
+**Measuring the port.** Test it with a round trip that proves the shell ran
+the command (`echo MARK$((20+22))` must come back as `MARK42`). Don't measure
+the byte rate with a raw `os.read` on a port you haven't configured: that
+once reported a bogus 800 KB/s "flood" of repeated data.
 
 ## Camera
 
@@ -35,8 +59,10 @@ false bands.
 
 ## What to look at
 
-`lcd/README.md` has the failure-mode table.  The `TEST_PATTERN=1` bars make a
-swapped channel obvious; the ramp makes a reversed or stuck bit obvious.
+`lcd/README.md` has the failure-mode table.  The `bars` pattern makes a
+swapped channel obvious; `ramps` and `walk all` make a reversed or stuck bit
+obvious; `grid` shows offsets, mirroring and a wrong DCLK edge (a coloured
+border column).
 
 First split, before anything subtle: **is the backlight on?**  `o_bl_en` drives
 the MT3608 boost (U701).  Backlight on but no image, versus no backlight at

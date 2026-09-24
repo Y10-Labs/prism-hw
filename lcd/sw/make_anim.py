@@ -25,6 +25,7 @@ File format (little-endian), gzip-compressed as a whole:
 import argparse
 import gzip
 import math
+import os
 import struct
 
 from PIL import Image, ImageChops, ImageDraw, ImageFont
@@ -105,6 +106,9 @@ def main():
     ap.add_argument("--png-dir")
     a = ap.parse_args()
 
+    os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
+    if a.png_dir:
+        os.makedirs(a.png_dir, exist_ok=True)
     bg = background()
     blob = bytearray(b"LCDANIM1" + struct.pack("<4H", W, H, a.frames, 4))
     blob += xrgb(bg)
