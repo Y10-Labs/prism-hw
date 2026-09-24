@@ -13,9 +13,9 @@
 // Every output is driven from a single register stage so DE, the syncs and
 // the pixel data are aligned at the pins with no relative skew.
 //
-// o_x / o_y / o_active are the *pre-register* coordinates: a pixel source
-// must register its data off them with exactly one cycle of latency for
-// i_pixel to land in the same stage as o_de.
+// o_x / o_y / o_active are the *pre-register* coordinates, in the same
+// cycle as the registers' inputs: lcd_controller samples a pixel for
+// (o_x, o_y) in that same cycle, so an external source has zero latency.
 //
 // Changing the mode while running is safe: the counters wrap on ">= total",
 // so a shrinking total can never strand them past the end of a line/frame.

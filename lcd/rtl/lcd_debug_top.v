@@ -5,6 +5,9 @@
 //     FCLK0  50 MHz  -> AXI clock (M_AXI_GP0 -> AXI4-Lite -> lcd_regs_axil)
 //     FCLK1  pixel   -> lcd_controller.  Rate set at runtime from Linux by
 //                       rewriting FPGA1_CLK_CTRL (sw/lcdctl.py `pclk`).
+//     AXI VDMA (in the BD, regs at 0x4300_0000): reads frame buffers from DDR
+//                       through S_AXI_HP0 and streams them out on M_AXIS_VID
+//                       (FCLK0) -> lcd_stream_src -> i_pixel (pattern `ext`).
 //
 // The Prism board has no PL oscillator (its only one feeds PS_CLK), so both
 // clocks necessarily come from the PS.  No MMCM: the pixel clock is a pure
@@ -61,6 +64,10 @@ module lcd_debug_top #(
     wire awvalid, awready, wvalid, wready, bvalid, bready;
     wire arvalid, arready, rvalid, rready;
 
+    wire [31:0] vid_tdata;
+    wire [0:0]  vid_tuser;
+    wire        vid_tlast, vid_tvalid, vid_tready;
+
     prism_ps_wrapper u_ps (
         .DDR_addr (DDR_addr), .DDR_ba (DDR_ba), .DDR_cas_n (DDR_cas_n),
         .DDR_ck_n (DDR_ck_n), .DDR_ck_p (DDR_ck_p), .DDR_cke (DDR_cke),
@@ -85,7 +92,13 @@ module lcd_debug_top #(
         .M_AXI_LCD_araddr  (araddr),  .M_AXI_LCD_arprot  (),
         .M_AXI_LCD_arvalid (arvalid), .M_AXI_LCD_arready (arready),
         .M_AXI_LCD_rdata   (rdata),   .M_AXI_LCD_rresp   (rresp),
-        .M_AXI_LCD_rvalid  (rvalid),  .M_AXI_LCD_rready  (rready)
+        .M_AXI_LCD_rvalid  (rvalid),  .M_AXI_LCD_rready  (rready),
+
+        .M_AXIS_VID_tdata  (vid_tdata),
+        .M_AXIS_VID_tuser  (vid_tuser),
+        .M_AXIS_VID_tlast  (vid_tlast),
+        .M_AXIS_VID_tvalid (vid_tvalid),
+        .M_AXIS_VID_tready (vid_tready)
     );
 
     // ---- registers --------------------------------------------------------
@@ -99,6 +112,11 @@ module lcd_debug_top #(
     wire [29:0] pin_value;
     wire [2:0]  seq_state;
     wire        ready, frame_start;
+    wire [11:0] px_x, px_y;
+    wire        px_active;
+    wire [23:0] ext_pixel;
+    wire [1:0]  src_state;
+    wire        src_underflow, src_misalign;
 
     lcd_regs_axil #(
         .BUILD_ID (BUILD_ID),
@@ -142,7 +160,30 @@ module lcd_debug_top #(
         // pin flops are in the IOBs and cannot also feed fabric logic
         .i_disp        (seq_state == 3'd3 || seq_state == 3'd4 || seq_state == 3'd5),
         .i_bl_en       (ready),
-        .i_frame_start (frame_start)
+        .i_frame_start (frame_start),
+        .i_src_state     (src_state),
+        .i_src_underflow (src_underflow),
+        .i_src_misalign  (src_misalign)
+    );
+
+    // ---- DDR frame stream -> pixels ------------------------------------------
+    lcd_stream_src u_src (
+        .s_axis_aclk    (axi_clk),
+        .s_axis_aresetn (axi_aresetn),
+        .s_axis_tdata   (vid_tdata),
+        .s_axis_tuser   (vid_tuser),
+        .s_axis_tlast   (vid_tlast),
+        .s_axis_tvalid  (vid_tvalid),
+        .s_axis_tready  (vid_tready),
+        .clk            (pix_clk),
+        .rst_n          (pix_aresetn),     // external reset only, see lcd_async_fifo
+        .i_x            (px_x),
+        .i_y            (px_y),
+        .i_active       (px_active),
+        .o_pixel        (ext_pixel),
+        .o_state        (src_state),
+        .o_underflow    (src_underflow),
+        .o_misalign     (src_misalign)
     );
 
     // ---- controller -------------------------------------------------------
@@ -167,10 +208,10 @@ module lcd_debug_top #(
         .i_pattern      (pattern),
         .i_pattern_arg  (pattern_arg),
         .i_solid        (solid),
-        .o_x            (),
-        .o_y            (),
-        .o_active       (),
-        .i_pixel        (24'd0),
+        .o_x            (px_x),
+        .o_y            (px_y),
+        .o_active       (px_active),
+        .i_pixel        (ext_pixel),
 
         .i_pin_override (pin_ovr),
         .i_pin_value    (pin_value),

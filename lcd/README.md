@@ -20,7 +20,10 @@ rtl/lcd_power_seq.v    power-up / power-down ordering (DISP, backlight, blank)
 rtl/lcd_clock_out.v    DCLK forwarding through an ODDR
 rtl/lcd_controller.v   timing + sequencer + test patterns + pin override
 rtl/lcd_regs_axil.v    AXI4-Lite registers, CDC into the pixel domain
-rtl/lcd_debug_top.v    debug bitstream: PS7 + registers + controller
+rtl/lcd_debug_top.v    debug bitstream: PS7 + VDMA + registers + controller
+rtl/lcd_stream_src.v   AXI4-Stream video (VDMA MM2S) -> i_pixel, frame-aligned on SOF
+rtl/lcd_async_fifo.v   dual-clock first-word-fall-through FIFO (AXI -> pixel clock)
+sw/make_anim.py        host: N-frame animation as background + per-frame patches
 rtl/lcd_bringup_top.v  fixed-mode wrapper, defaults only (synth checks)
 tb/                    self-checking testbenches
 xdc/                   Prism board pin + timing constraints
@@ -28,6 +31,7 @@ syn/build_debug.tcl    Vivado batch build of the debug bitstream
 syn/ps7_prism_config.tcl  the board's PS7 config (generated from the XSA)
 syn/synth_lcd.tcl      batch synth/impl of lcd_bringup_top for any part
 sw/lcdctl.py           runs on the board: drive every knob from the shell
+sw/make_test_images.py host: the two 800x480 XRGB test frames for the DDR path
 ```
 
 ## Test
@@ -217,9 +221,10 @@ Reading the failure modes, given the panel's defaults cannot be changed:
 | image shifted / cropped | porches | `sweep h_bp ...` |
 | no backlight | BL_EN / MT3608 | `pin set bl=1` |
 
-Pattern `ext` takes pixels from `i_pixel`. The source must register off `o_x`
-/ `o_y` with **exactly one cycle** of latency so its data lands in the same
-stage as `o_de`.
+Pattern `ext` takes pixels from `i_pixel`, which is sampled **in the same
+cycle** as `o_x` / `o_y` / `o_active` (zero latency): it must be the pixel
+for the coordinates currently presented. `lcd_stream_src` meets this with a
+first-word-fall-through FIFO popped on `o_active`.
 
 ## Debugging from PetaLinux
 
@@ -276,3 +281,62 @@ Registers, at 0x43C0_0000 (every config write is applied at once):
 | 0x44 | FRAME_CNT | RO |
 | 0x48 | PCLK_HZ | RO measured pixel clock (100 ms gate) |
 | 0x4C | SCRATCH | RW, no effect |
+
+CTRL[10] `src_clear` clears the sticky stream flags; STATUS[9:8] is the
+stream source state (0 SEEK, 1 READY, 2 RUN), [10] underflow seen, [11]
+misalign seen.
+
+## Images from DDR (AXI VDMA)
+
+```
+DDR 0x1C000000 + n*1.5MiB (32 stores) -> S_AXI_HP0 -> AXI VDMA MM2S (0x4300_0000)
+  -> AXI4-Stream (FCLK0) -> lcd_async_fifo -> lcd_stream_src -> pattern `ext`
+```
+
+**Frame buffers.** The top 64 MB of DDR (0x1C000000-0x1FFFFFFF) is hidden
+from Linux by adding `mem=448M` to the kernel command line through
+`/run/media/BOOT-mmcblk0p1/uEnv.txt` (PetaLinux's boot.scr imports it):
+
+```
+bootargs=console=ttyPS0,115200 earlycon root=/dev/mmcblk0p2 ro rootwait mem=448M
+```
+
+Check with `grep "System RAM" /proc/iomem` -> `00000000-1bffffff`. Delete
+uEnv.txt to undo. **Power-cycle, don't `reboot`:** a software reboot on this
+board stops after "Restarting system" and never comes back. The kernel's own 16 MB CMA pool has no userspace path on
+this image (no dma-heap / udmabuf, no kernel headers), hence the reservation.
+Frames are XRGB8888, little-endian `0x00RRGGBB`, stride 3200 B, 1,536,000 B
+each, one frame store every 1.5 MiB: 32 stores, the VDMA's maximum. Stores
+16-31 are programmed through `MM2S_REG_INDEX` (0x14): only 16 start-address
+registers exist, banked (PG020). `/dev/mem` maps the reserved region uncached, so the VDMA
+(which is not cache-coherent on HP0) always reads what the CPU wrote.
+
+**Alignment.** The VDMA free-runs (no fsync); `lcd_stream_src` locks every
+panel frame to the stream's SOF (`tuser`), dropping data until one arrives,
+so frames are always whole: switching the park pointer never tears.
+
+```sh
+./sw/make_test_images.py build/frames          # on the host: frame0/1 .png + .raw
+python3 lcdctl.py fb load 0 frame0.raw         # on the board
+python3 lcdctl.py fb load 1 frame1.raw
+python3 lcdctl.py video start                  # VDMA on, pattern ext
+python3 lcdctl.py flip --fps 5                 # alternate 0/1 (nohup ... & to detach)
+python3 lcdctl.py video status                 # VDMA SR + stream underflow/misalign
+python3 lcdctl.py video stop
+```
+
+**60 fps animation.** In circular mode the VDMA moves to the next frame store
+at every frame boundary, and because the panel back-pressures the stream that
+is exactly one store per panel refresh - no software timing involved.
+`make_anim.py` renders a seamless 32-frame loop (orbiting ball, spoke, frame
+counter) and stores it as one background plus each frame's changed
+rectangles (84 KB gzipped instead of 48 MB); `anim load` rebuilds the frames
+in DDR on the board.
+
+```sh
+./sw/make_anim.py build/anim/loop32.anim --frames 32 --png-dir build/anim   # host
+python3 lcdctl.py anim load loop32.anim     # board: 32 frames built in ~0.7 s
+python3 lcdctl.py anim play                 # circular over stores 0..31
+python3 lcdctl.py anim check                # measured: 60.00 stores/s = 60.00 panel fps,
+                                            # 0 skipped/repeated, no underflow
+```

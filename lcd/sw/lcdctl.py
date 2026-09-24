@@ -21,6 +21,14 @@ Runs ON THE BOARD (python3, root, /dev/mem).  Talks to lcd_regs_axil at
     lcdctl.py reset                                   # pulse the pixel soft reset
     lcdctl.py dump                                    # raw registers
 
+  DDR frame buffers -> AXI VDMA -> panel (needs mem=448M, see lcd/README.md):
+    lcdctl.py fb load N frameN.raw                    # 800x480 XRGB8888 into store N
+    lcdctl.py video start | stop | park N | status    # VDMA MM2S, park mode
+    lcdctl.py flip [--fps 5] [--seconds S]            # alternate stores 0 and 1
+    lcdctl.py anim load loop.anim                     # background + patches -> stores
+    lcdctl.py anim play [N]                           # circular: 1 store per panel frame
+    lcdctl.py anim check                              # measure fps, count skips/repeats
+
 SAFETY: with no bitstream in the PL, any access to 0x4000_0000..0xBFFF_FFFF
 hangs the AXI bus and the board needs a power cycle.  Every PL access here is
 gated on the FPGA manager reporting "operating", the level shifters being on,
@@ -63,6 +71,17 @@ R_PIN_VALUE = 0x30
 R_STATUS, R_FRAME_CNT, R_PCLK_HZ, R_SCRATCH = 0x40, 0x44, 0x48, 0x4C
 LCD_ID = 0x4C434431
 
+# AXI VDMA (MM2S only) and the frame buffers.  The buffers live in the top
+# 64 MB of DDR, which the board hides from Linux with mem=448M: 32 frame
+# stores (the VDMA maximum) of 1.5 MiB, each holding one 1,536,000 B frame.
+VDMA_BASE     = 0x43000000
+FB_BASE       = 0x1C000000
+FB_SPACING    = 0x00180000       # 1.5 MiB per frame store
+FB_COUNT      = 32
+BPP           = 4                # XRGB8888, little-endian 0x00RRGGBB
+V_CR, V_SR, V_REG_INDEX, V_FRMSTORE, V_PARK, V_VERSION = 0x00, 0x04, 0x14, 0x18, 0x28, 0x2C
+V_VSIZE, V_HSIZE, V_STRIDE, V_ADDR0 = 0x50, 0x54, 0x58, 0x5C
+
 # field name -> (register, lsb, width)
 FIELDS = {
     "enable":       (R_CTRL, 0, 1),
@@ -73,6 +92,7 @@ FIELDS = {
     "de_only":      (R_CTRL, 5, 1),
     "soft_rst":     (R_CTRL, 8, 1),
     "override":     (R_CTRL, 9, 1),
+    "src_clear":    (R_CTRL, 10, 1),
     "h_active":     (R_H_ACT_FP, 0, 12),
     "h_fp":         (R_H_ACT_FP, 16, 12),
     "h_sync":       (R_H_SYNC_BP, 0, 12),
@@ -92,7 +112,7 @@ FIELDS = {
 }
 
 PATTERNS = {"bars": 0, "solid": 1, "walk": 2, "ramps": 3, "grid": 4,
-            "checker": 5, "ext": 6, "black": 15}
+            "checker": 5, "ext": 6, "black": 15}   # ext = DDR frames via VDMA
 
 SEQ_STATES = ["OFF", "VDD_WAIT", "BLANK", "DISP_WAIT", "RUN", "BL_OFF",
               "DISP_OFF", "?7"]
@@ -578,11 +598,233 @@ def cmd_load(args):
     print("ID OK, build 0x%08X, scratch %s" % (L.rd(R_BUILD), "OK" if ok else "FAILED"))
 
 
+# ---------------------------------------------------------------------------
+# DDR frame buffers + VDMA
+# ---------------------------------------------------------------------------
+def fb_region_is_free():
+    """True if the frame-buffer region is outside every System RAM range.
+    Writing it while Linux owns it would corrupt the kernel."""
+    lo, hi = FB_BASE, FB_BASE + FB_COUNT * FB_SPACING - 1
+    with open("/proc/iomem") as f:
+        for line in f:
+            if "System RAM" in line:
+                a, b = (int(x, 16) for x in line.split(":")[0].strip().split("-"))
+                if a <= hi and lo <= b:
+                    return False
+    return True
+
+
+_fb = None
+
+
+def fb():
+    global _fb
+    if _fb is None:
+        if not fb_region_is_free():
+            sys.exit("0x%08X.. is System RAM - boot with mem=448M (uEnv.txt) "
+                     "before using frame buffers" % FB_BASE)
+        _fb = Mem(FB_BASE, FB_COUNT * FB_SPACING)
+    return _fb
+
+
+_vdma = None
+
+
+def vdma():
+    global _vdma
+    if _vdma is None:
+        lcd()                              # the same PL safety gate + ID check
+        _vdma = Mem(VDMA_BASE, 0x10000)
+    return _vdma
+
+
+def frame_geometry():
+    return get_field("h_active"), get_field("v_active")
+
+
+def cmd_fb(args):
+    if len(args) != 3 or args[0] != "load":
+        sys.exit("fb load N file.raw")
+    n, path = int(args[1]), args[2]
+    if not 0 <= n < FB_COUNT:
+        sys.exit("frame store 0..%d" % (FB_COUNT - 1))
+    data = open(path, "rb").read()
+    w, h = frame_geometry()
+    if len(data) != w * h * BPP:
+        sys.exit("%s is %d bytes, expected %d (%dx%dx%d)" % (
+            path, len(data), w * h * BPP, w, h, BPP))
+    off = n * FB_SPACING
+    t0 = time.time()
+    fb().mm[off:off + len(data)] = data
+    ok = fb().mm[off:off + len(data)] == data
+    print("frame %d @ 0x%08X: %d bytes in %.2f s, readback %s" % (
+        n, FB_BASE + off, len(data), time.time() - t0, "OK" if ok else "MISMATCH"))
+
+
+def vdma_status_str():
+    v = vdma()
+    sr = v.rd(V_SR)
+    flags = [name for bit, name in ((0, "halted"), (4, "INT_ERR"), (5, "SLV_ERR"),
+                                    (6, "DEC_ERR"), (7, "SOF_EARLY"))
+             if sr >> bit & 1]
+    return "CR=0x%08X SR=0x%08X [%s] park=%d (reading %d)" % (
+        v.rd(V_CR), sr, " ".join(flags) or "running",
+        v.rd(V_PARK) & 0x1F, (v.rd(V_PARK) >> 16) & 0x1F)
+
+
+def vdma_run(circular, nstores):
+    """(Re)start MM2S over frame stores 0..nstores-1: park mode (store in
+    PARK_PTR) or circular mode (advance one store per frame, i.e. one per
+    panel refresh, because the panel back-pressures the stream)."""
+    fb()                                   # refuses unless the region is reserved
+    v = vdma()
+    w, h = frame_geometry()
+    v.wr(V_CR, 0x4)                        # soft reset
+    t0 = time.time()
+    while v.rd(V_CR) & 0x4 and time.time() - t0 < 0.1:
+        pass
+    v.wr(V_FRMSTORE, nstores)
+    v.wr(V_CR, 0x1 | (0x2 if circular else 0))   # RS, Circular_Park
+    # Only 16 start-address registers exist (0x5C..0x98); with more than 16
+    # frame stores, stores 16..31 sit behind the same offsets, selected by
+    # MM2S_REG_INDEX = 1 (PG020).  Writing 0x9C.. instead silently does
+    # nothing and the VDMA later halts with SLV_ERR on store 16.
+    for i in range(FB_COUNT):
+        v.wr(V_REG_INDEX, i // 16)
+        v.wr(V_ADDR0 + 4 * (i % 16), FB_BASE + i * FB_SPACING)
+    v.wr(V_REG_INDEX, 0)
+    v.wr(V_PARK, 0)
+    v.wr(V_STRIDE, w * BPP)                # frame delay 0
+    v.wr(V_HSIZE, w * BPP)
+    v.wr(V_VSIZE, h)                       # writing VSIZE starts the channel
+    set_fields([("src_clear", 1)])
+    set_fields([("src_clear", 0), ("pattern", PATTERNS["ext"])])
+    time.sleep(0.1)
+
+
+def cmd_anim(args):
+    import gzip
+    import struct
+    sub = args[0] if args else "check"
+    if sub == "load":
+        blob = gzip.decompress(open(args[1], "rb").read())
+        if blob[:8] != b"LCDANIM1":
+            sys.exit("not an LCDANIM1 file")
+        w, h, n, bpp = struct.unpack_from("<4H", blob, 8)
+        if (w, h, bpp) != (*frame_geometry(), BPP) or not 1 <= n <= FB_COUNT:
+            sys.exit("file is %dx%dx%d with %d frames; need %dx%dx%d, <= %d frames"
+                     % (w, h, bpp, n, *frame_geometry(), BPP, FB_COUNT))
+        pos = 16
+        bg = blob[pos:pos + w * h * bpp]
+        pos += len(bg)
+        m = fb().mm
+        t0 = time.time()
+        for i in range(n):
+            base = i * FB_SPACING
+            m[base:base + len(bg)] = bg
+            (nr,) = struct.unpack_from("<H", blob, pos)
+            pos += 2
+            for _ in range(nr):
+                x, y, rw, rh = struct.unpack_from("<4H", blob, pos)
+                pos += 8
+                row = rw * bpp
+                for yy in range(rh):
+                    o = base + ((y + yy) * w + x) * bpp
+                    m[o:o + row] = blob[pos:pos + row]
+                    pos += row
+        print("%d frames built in stores 0..%d in %.1f s" % (n, n - 1, time.time() - t0))
+        with open("/tmp/lcd_anim_frames", "w") as f:
+            f.write(str(n))
+    elif sub == "play":
+        try:
+            n = int(args[1]) if len(args) > 1 else int(open("/tmp/lcd_anim_frames").read())
+        except OSError:
+            sys.exit("anim play N  (or run `anim load` first)")
+        vdma_run(circular=True, nstores=n)
+        print("playing %d frames in circular mode: VDMA %s" % (n, vdma_status_str()))
+    elif sub == "check":
+        # Sample which store the VDMA is reading, as fast as Python can, for
+        # one second.  At 60 fps a store lasts 16.6 ms, far longer than a
+        # sample, so every change is seen: +1 (mod N) is a clean step,
+        # anything else is a skip or a repeat.
+        v, L = vdma(), lcd()
+        n = v.rd(V_FRMSTORE) & 0x3F
+        fc0, t0 = L.rd(R_FRAME_CNT), time.time()
+        last = (v.rd(V_PARK) >> 16) & 0x1F
+        steps = bad = samples = 0
+        while time.time() - t0 < 1.0:
+            cur = (v.rd(V_PARK) >> 16) & 0x1F
+            samples += 1
+            if cur != last:
+                steps += 1
+                if cur != (last + 1) % n:
+                    bad += 1
+                last = cur
+        dt = time.time() - t0
+        fc = L.rd(R_FRAME_CNT) - fc0
+        st = L.rd(R_STATUS)
+        print("VDMA stores/s : %.2f   panel frames/s : %.2f   (%d stores in the loop)"
+              % (steps / dt, fc / dt, n))
+        print("out-of-order steps: %d   samples: %d   underflow_seen=%d misalign_seen=%d"
+              % (bad, samples, (st >> 10) & 1, (st >> 11) & 1))
+        print("VDMA: " + vdma_status_str())
+    else:
+        sys.exit("anim load FILE | play [N] | check")
+
+
+def cmd_video(args):
+    sub = args[0] if args else "status"
+    v = vdma()
+    if sub == "start":
+        vdma_run(circular=False, nstores=FB_COUNT)
+        print("VDMA: " + vdma_status_str())
+        cmd_video(["status"])
+    elif sub == "stop":
+        set_fields([("pattern", PATTERNS["bars"])])
+        v.wr(V_CR, 0x0)
+        print("VDMA stopped, back to colour bars")
+    elif sub == "park":
+        n = int(args[1])
+        v.wr(V_PARK, n & 0x1F)
+        print("park -> frame %d" % n)
+    elif sub == "status":
+        st = lcd().rd(R_STATUS)
+        print("VDMA   : " + vdma_status_str())
+        print("stream : %s  underflow_seen=%d misalign_seen=%d" % (
+            ["SEEK", "READY", "RUN", "?"][(st >> 8) & 3], (st >> 10) & 1, (st >> 11) & 1))
+    else:
+        sys.exit("video start | stop | park N | status")
+
+
+def cmd_flip(args):
+    fps = 5.0
+    seconds = None
+    if "--fps" in args:
+        fps = float(args[args.index("--fps") + 1])
+    if "--seconds" in args:
+        seconds = float(args[args.index("--seconds") + 1])
+    v = vdma()
+    period = 1.0 / fps
+    n, t_next, t0 = 0, time.time(), time.time()
+    print("flipping frames 0/1 at %.2f fps%s (Ctrl-C to stop)" % (
+        fps, "" if seconds is None else " for %.0f s" % seconds), flush=True)
+    try:
+        while seconds is None or time.time() - t0 < seconds:
+            v.wr(V_PARK, n % FB_COUNT)
+            n += 1
+            t_next += period
+            time.sleep(max(0.0, t_next - time.time()))
+    except KeyboardInterrupt:
+        pass
+    print("%d flips in %.1f s (%.2f fps)" % (n, time.time() - t0, n / (time.time() - t0)))
+
+
 COMMANDS = {
     "status": cmd_status, "limits": cmd_limits, "on": cmd_on, "off": cmd_off,
     "set": cmd_set, "mode": cmd_mode, "pattern": cmd_pattern, "solid": cmd_solid,
     "walk": cmd_walk, "pclk": cmd_pclk, "sweep": cmd_sweep, "pin": cmd_pin,
     "reset": cmd_reset, "dump": cmd_dump, "load": cmd_load,
+    "fb": cmd_fb, "video": cmd_video, "flip": cmd_flip, "anim": cmd_anim,
 }
 
 

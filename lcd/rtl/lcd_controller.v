@@ -17,8 +17,10 @@
 //             blocks in the top-left / top-right / bottom-left corners
 //             (mirroring, flipping and porch offsets are obvious)
 //   5 CHECKER 32 px black/white checkerboard
-//   6 EXT     i_pixel.  The source must register off o_x / o_y with EXACTLY
-//             one cycle of latency so i_pixel lands in the same stage as DE.
+//   6 EXT     i_pixel, sampled in the SAME cycle as o_x / o_y / o_active
+//             (zero latency): i_pixel must be the pixel for the o_x / o_y
+//             currently presented.  lcd_stream_src does this with a
+//             first-word-fall-through FIFO popped on o_active.
 //   other     black
 //
 // Pin override (i_pin_override = 1): every panel pin, DCLK included, is

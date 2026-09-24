@@ -21,6 +21,7 @@
 //                        [2] hs_active_low [3] vs_active_low
 //                        [4] de_active_low [5] de_only (HSYNC/VSYNC held low)
 //                        [8] pix_soft_rst  [9] pin_override
+//                        [10] src_clear (clears the sticky stream flags)
 //   0x10 H_ACT_FP    RW  [11:0] h_active   [27:16] h_front
 //   0x14 H_SYNC_BP   RW  [11:0] h_sync     [27:16] h_back
 //   0x18 V_ACT_FP    RW  [11:0] v_active   [27:16] v_front
@@ -32,6 +33,8 @@
 //   0x30 PIN_VALUE   RW  [29:0] {bl, disp, de, vs, hs, dclk, R, G, B}
 //   0x40 STATUS      RO  [2:0] seq state  [3] ready  [4] applied
 //                        [5] pixel clock alive  [6] disp  [7] bl_en
+//                        [9:8] stream source state (0 SEEK, 1 READY, 2 RUN)
+//                        [10] stream underflow seen  [11] stream misalign seen
 //   0x44 FRAME_CNT   RO  frames started since reset
 //   0x48 PCLK_HZ     RO  measured pixel clock, 10 Hz resolution, 100 ms gate
 //   0x4C SCRATCH     RW  bus sanity check, no effect
@@ -92,7 +95,10 @@ module lcd_regs_axil #(
     input  wire        i_ready,
     input  wire        i_disp,
     input  wire        i_bl_en,
-    input  wire        i_frame_start
+    input  wire        i_frame_start,
+    input  wire [1:0]  i_src_state,
+    input  wire        i_src_underflow,   // pulses, pixel domain
+    input  wire        i_src_misalign
 );
 
     localparam [31:0] ID = 32'h4C434431;   // "LCD1"
@@ -173,7 +179,7 @@ module lcd_regs_axil #(
 
     // ---- status from the pixel domain ----
     reg  [2:0] ack_sync;                    // echoed apply toggle
-    reg  [7:0] st_sync1, st_sync2;
+    reg [11:0] st_sync1, st_sync2;
     reg [31:0] fc_sync1, fc_sync2;          // Gray-coded frame counter
     reg [31:0] pc_sync1, pc_sync2;          // Gray-coded pixel clock counter
 
@@ -181,11 +187,14 @@ module lcd_regs_axil #(
     reg        apply_ack;
     reg  [4:0] st_pix;
     reg        i_disp_q, i_bl_en_q;
+    reg  [1:0] src_state_q;
+    reg        src_uf_sticky, src_mis_sticky, src_clr;
     reg [31:0] fc_gray, pc_gray;
 
     always @(posedge s_axi_aclk) begin
         ack_sync <= {ack_sync[1:0], apply_ack};
-        st_sync1 <= {i_bl_en_q, i_disp_q, 1'b0, 1'b0, st_pix[3:0]};
+        st_sync1 <= {src_mis_sticky, src_uf_sticky, src_state_q,
+                     i_bl_en_q, i_disp_q, 1'b0, 1'b0, st_pix[3:0]};
         st_sync2 <= st_sync1;
         fc_sync1 <= fc_gray;  fc_sync2 <= fc_sync1;
         pc_sync1 <= pc_gray;  pc_sync2 <= pc_sync1;
@@ -218,7 +227,7 @@ module lcd_regs_axil #(
         else gate_cnt <= gate_cnt + 1'b1;
     end
 
-    wire [31:0] status = {24'd0, st_sync2[7:6], (pclk_hz != 32'd0),
+    wire [31:0] status = {20'd0, st_sync2[11:8], st_sync2[7:6], (pclk_hz != 32'd0),
                           (ack_sync[2] == apply_req), st_sync2[3:0]};
 
     // ---- read channel ----
@@ -273,6 +282,7 @@ module lcd_regs_axil #(
         if (!pix_rst_n) begin
             apply_ack       <= 1'b0;
             soft_rst        <= 1'b0;
+            src_clr         <= 1'b0;
             o_enable        <= CTRL_RST[0];
             o_clk_invert    <= CTRL_RST[1];
             o_hs_active_low <= CTRL_RST[2];
@@ -306,6 +316,7 @@ module lcd_regs_axil #(
             o_de_active_low <= r_ctrl[4];
             o_de_only       <= r_ctrl[5];
             soft_rst        <= r_ctrl[8];
+            src_clr         <= r_ctrl[10];
             o_pin_override  <= r_ctrl[9];
             o_h_active      <= r_h_act_fp[11:0];
             o_h_front       <= r_h_act_fp[27:16];
@@ -332,6 +343,15 @@ module lcd_regs_axil #(
         st_pix    <= {1'b0, i_ready, i_seq_state};
         i_disp_q  <= i_disp;
         i_bl_en_q <= i_bl_en;
+        src_state_q <= i_src_state;
+        if (!pix_rst_n || src_clr) begin
+            src_uf_sticky  <= 1'b0;
+            src_mis_sticky <= 1'b0;
+        end
+        else begin
+            if (i_src_underflow) src_uf_sticky  <= 1'b1;
+            if (i_src_misalign)  src_mis_sticky <= 1'b1;
+        end
         if (!pix_rst_n) begin
             fc_bin  <= 32'd0;
             fc_gray <= 32'd0;

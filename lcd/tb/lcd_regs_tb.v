@@ -51,7 +51,8 @@ module lcd_regs_tb;
         .o_vdd_wait(vdd), .o_blank_frames(bl_f), .o_disp_frames(disp_f), .o_off_frames(off_f),
         .o_pin_override(ovr), .o_pin_value(pin_val),
         .i_seq_state(3'd4), .i_ready(1'b1), .i_disp(1'b1), .i_bl_en(1'b1),
-        .i_frame_start(frame_start)
+        .i_frame_start(frame_start),
+        .i_src_state(2'd2), .i_src_underflow(1'b0), .i_src_misalign(1'b0)
     );
 
     integer errors = 0;

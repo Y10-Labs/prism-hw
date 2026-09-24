@@ -11,9 +11,13 @@
 #
 # Block design prism_ps: the PS7 configured exactly as the board's FSBL
 # configured it (ps7_prism_config.tcl, lifted from the reference XSA), plus
-#   FCLK0 50 MHz  -> M_AXI_GP0 -> AXI3-to-AXI4-Lite -> port M_AXI_LCD
+#   FCLK0 50 MHz  -> M_AXI_GP0 -> SmartConnect -> port M_AXI_LCD (AXI4-Lite)
+#                                              -> AXI VDMA control
+#   AXI VDMA MM2S -> SmartConnect -> S_AXI_HP0 (DDR);  stream -> port M_AXIS_VID
 #   FCLK1         -> port pix_clk (rate set at runtime from Linux)
-# M_AXI_LCD is mapped at 0x43C0_0000, 4 KB.
+# Address map (GP0): M_AXI_LCD 0x43C0_0000 (4 KB), VDMA 0x4300_0000 (64 KB).
+# The VDMA reads frame buffers the board reserves with mem=448M at
+# 0x1C00_0000 and up (see lcd/README.md).
 # ---------------------------------------------------------------------------
 
 set script_dir [file normalize [file dirname [info script]]]
@@ -41,6 +45,8 @@ source [file join $script_dir ps7_prism_config.tcl]
 set_property -dict $PRISM_PS7_CONFIG $ps
 set_property -dict [list \
     CONFIG.PCW_USE_M_AXI_GP0             {1} \
+    CONFIG.PCW_USE_S_AXI_HP0             {1} \
+    CONFIG.PCW_S_AXI_HP0_DATA_WIDTH      {64} \
     CONFIG.PCW_FPGA_FCLK0_ENABLE         {1} \
     CONFIG.PCW_FPGA_FCLK1_ENABLE         {1} \
     CONFIG.PCW_EN_CLK0_PORT              {1} \
@@ -53,12 +59,33 @@ set_property -dict [list \
 apply_bd_automation -rule xilinx.com:bd_rule:processing_system7 \
     -config {make_external "FIXED_IO, DDR" apply_board_preset "0" Master "Disable" Slave "Disable"} $ps
 
-set pc [create_bd_cell -type ip -vlnv xilinx.com:ip:axi_protocol_converter:2.1 axi_pc]
-set_property -dict [list CONFIG.MI_PROTOCOL {AXI4LITE} CONFIG.TRANSLATION_MODE {2}] $pc
+set smc_ctl [create_bd_cell -type ip -vlnv xilinx.com:ip:smartconnect:1.0 smc_ctl]
+set_property -dict [list CONFIG.NUM_SI {1} CONFIG.NUM_MI {2}] $smc_ctl
+set smc_hp [create_bd_cell -type ip -vlnv xilinx.com:ip:smartconnect:1.0 smc_hp]
+set_property -dict [list CONFIG.NUM_SI {1} CONFIG.NUM_MI {1}] $smc_hp
+
+# MM2S only, free-running (no fsync).  32 frame stores (the maximum), and the
+# FRMSTORE register so software picks how many are live: park mode for a
+# still image, circular mode to play an animation at the panel's frame rate.
+set vdma [create_bd_cell -type ip -vlnv xilinx.com:ip:axi_vdma:6.3 vdma]
+set_property -dict [list \
+    CONFIG.c_include_s2mm             {0} \
+    CONFIG.c_include_mm2s             {1} \
+    CONFIG.c_include_sg               {0} \
+    CONFIG.c_num_fstores              {32} \
+    CONFIG.c_enable_mm2s_frmstr_reg   {1} \
+    CONFIG.c_m_axi_mm2s_data_width    {64} \
+    CONFIG.c_m_axis_mm2s_tdata_width  {32} \
+    CONFIG.c_mm2s_max_burst_length    {16} \
+    CONFIG.c_mm2s_linebuffer_depth    {2048} \
+    CONFIG.c_use_mm2s_fsync           {0} \
+    CONFIG.c_mm2s_genlock_mode        {0} \
+] $vdma
 
 set rst_axi [create_bd_cell -type ip -vlnv xilinx.com:ip:proc_sys_reset:5.0 rst_axi]
 set rst_pix [create_bd_cell -type ip -vlnv xilinx.com:ip:proc_sys_reset:5.0 rst_pix]
 
+set m_axis [create_bd_intf_port -mode Master -vlnv xilinx.com:interface:axis_rtl:1.0 M_AXIS_VID]
 set m_axi [create_bd_intf_port -mode Master -vlnv xilinx.com:interface:aximm_rtl:1.0 M_AXI_LCD]
 set_property -dict [list CONFIG.PROTOCOL {AXI4LITE} CONFIG.ADDR_WIDTH {32} \
                          CONFIG.DATA_WIDTH {32}] $m_axi
@@ -67,27 +94,45 @@ create_bd_port -dir O -type clk axi_clk
 create_bd_port -dir O -type clk pix_clk
 create_bd_port -dir O -type rst axi_aresetn
 create_bd_port -dir O -type rst pix_aresetn
-set_property CONFIG.ASSOCIATED_BUSIF {M_AXI_LCD} [get_bd_ports axi_clk]
+set_property CONFIG.ASSOCIATED_BUSIF {M_AXI_LCD:M_AXIS_VID} [get_bd_ports axi_clk]
 set_property CONFIG.ASSOCIATED_RESET {axi_aresetn} [get_bd_ports axi_clk]
 set_property CONFIG.ASSOCIATED_RESET {pix_aresetn} [get_bd_ports pix_clk]
 
-connect_bd_intf_net [get_bd_intf_pins ps7/M_AXI_GP0] [get_bd_intf_pins axi_pc/S_AXI]
-connect_bd_intf_net [get_bd_intf_pins axi_pc/M_AXI] $m_axi
+connect_bd_intf_net [get_bd_intf_pins ps7/M_AXI_GP0] [get_bd_intf_pins smc_ctl/S00_AXI]
+connect_bd_intf_net [get_bd_intf_pins smc_ctl/M00_AXI] $m_axi
+connect_bd_intf_net [get_bd_intf_pins smc_ctl/M01_AXI] [get_bd_intf_pins vdma/S_AXI_LITE]
+connect_bd_intf_net [get_bd_intf_pins vdma/M_AXI_MM2S] [get_bd_intf_pins smc_hp/S00_AXI]
+connect_bd_intf_net [get_bd_intf_pins smc_hp/M00_AXI] [get_bd_intf_pins ps7/S_AXI_HP0]
+connect_bd_intf_net [get_bd_intf_pins vdma/M_AXIS_MM2S] $m_axis
 
 connect_bd_net [get_bd_pins ps7/FCLK_CLK0] \
-    [get_bd_pins ps7/M_AXI_GP0_ACLK] [get_bd_pins axi_pc/aclk] \
+    [get_bd_pins ps7/M_AXI_GP0_ACLK] [get_bd_pins ps7/S_AXI_HP0_ACLK] \
+    [get_bd_pins smc_ctl/aclk] [get_bd_pins smc_hp/aclk] \
+    [get_bd_pins vdma/s_axi_lite_aclk] [get_bd_pins vdma/m_axi_mm2s_aclk] \
+    [get_bd_pins vdma/m_axis_mm2s_aclk] \
     [get_bd_pins rst_axi/slowest_sync_clk] [get_bd_ports axi_clk]
 connect_bd_net [get_bd_pins ps7/FCLK_CLK1] \
     [get_bd_pins rst_pix/slowest_sync_clk] [get_bd_ports pix_clk]
 connect_bd_net [get_bd_pins ps7/FCLK_RESET0_N] \
     [get_bd_pins rst_axi/ext_reset_in] [get_bd_pins rst_pix/ext_reset_in]
 connect_bd_net [get_bd_pins rst_axi/peripheral_aresetn] \
-    [get_bd_pins axi_pc/aresetn] [get_bd_ports axi_aresetn]
+    [get_bd_pins smc_ctl/aresetn] [get_bd_pins smc_hp/aresetn] \
+    [get_bd_pins vdma/axi_resetn] [get_bd_ports axi_aresetn]
 connect_bd_net [get_bd_pins rst_pix/peripheral_aresetn] [get_bd_ports pix_aresetn]
 
 assign_bd_address -offset 0x43C00000 -range 4K \
     -target_address_space [get_bd_addr_spaces ps7/Data] \
     [get_bd_addr_segs M_AXI_LCD/Reg] -force
+assign_bd_address -offset 0x43000000 -range 64K \
+    -target_address_space [get_bd_addr_spaces ps7/Data] \
+    [get_bd_addr_segs vdma/S_AXI_LITE/Reg] -force
+# VDMA -> HP0 -> the whole of DDR (it only ever reads the reserved 16 MB)
+assign_bd_address -target_address_space [get_bd_addr_spaces vdma/Data_MM2S] \
+    [get_bd_addr_segs ps7/S_AXI_HP0/HP0_DDR_LOWOCM] -force
+foreach seg [get_bd_addr_segs -of_objects [get_bd_addr_spaces {ps7/Data vdma/Data_MM2S}]] {
+    puts [format "ADDR %-40s 0x%08X  %s" [get_property NAME $seg] \
+        [get_property OFFSET $seg] [get_property RANGE $seg]]
+}
 
 validate_bd_design
 save_bd_design
@@ -104,6 +149,8 @@ add_files -norecurse [list \
     [file join $lcd_dir rtl lcd_clock_out.v]  \
     [file join $lcd_dir rtl lcd_controller.v] \
     [file join $lcd_dir rtl lcd_regs_axil.v]  \
+    [file join $lcd_dir rtl lcd_async_fifo.v] \
+    [file join $lcd_dir rtl lcd_stream_src.v] \
     [file join $lcd_dir rtl lcd_debug_top.v] ]
 set_property file_type {Verilog Header} [get_files lcd_defaults.vh]
 set_property include_dirs [file join $lcd_dir rtl] [current_fileset]
@@ -133,6 +180,7 @@ report_timing_summary -file [file join $outdir timing_summary.rpt]
 report_drc            -file [file join $outdir drc.rpt]
 report_io             -file [file join $outdir io.rpt]
 report_cdc            -file [file join $outdir cdc.rpt]
+
 
 set wns [get_property SLACK [get_timing_paths -delay_type max]]
 set whs [get_property SLACK [get_timing_paths -delay_type min]]
